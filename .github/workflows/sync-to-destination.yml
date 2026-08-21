@@ -1,0 +1,21 @@
+name: Sync to Destination Repository
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      
+      - name: Push to destination repository
+        run: |
+          git remote add destination https://github.com/Neksoft-Daya-2025/DejavuStudioNew.git
+          git push destination main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
