@@ -17,6 +17,16 @@ function figmaAssetResolver() {
 }
 
 export default defineConfig({
+  server: {
+    host: '127.0.0.1',
+    port: 5173,
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:3001',
+        changeOrigin: true,
+      },
+    },
+  },
   plugins: [
     figmaAssetResolver(),
     // The React and Tailwind plugins are both required for Make, even if
@@ -28,6 +38,21 @@ export default defineConfig({
     alias: {
       // Alias @ to the src directory
       '@': path.resolve(__dirname, './src'),
+    },
+  },
+
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined
+          if (id.includes('@mui') || id.includes('@emotion')) return 'ui-mui'
+          if (id.includes('@radix-ui')) return 'ui-radix'
+          if (id.includes('react') || id.includes('scheduler')) return 'react-vendor'
+          if (id.includes('date-fns')) return 'date-vendor'
+          return 'vendor'
+        },
+      },
     },
   },
 

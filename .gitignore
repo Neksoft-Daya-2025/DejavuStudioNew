@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.local-data/
+.env
+.env.local
+.env.production
+*.log
+tmp/
+.deploy-*/
+handoff-packages/
+*.tar.gz
+*.zip

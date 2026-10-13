@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef, createContext, useContext } from "react";
 import { createClient } from "@supabase/supabase-js";
-import type { Session, User } from "@supabase/supabase-js";
 import { motion, AnimatePresence } from "motion/react";
 import { RouterProvider, createBrowserRouter, Outlet, useNavigate, useLocation } from "react-router";
 import {
   Lock, X, ChevronLeft, ChevronRight, ChevronDown,
   Mic, Music, PenLine, SlidersHorizontal, Activity, Layers,
   TrendingUp, Sparkles, Camera, Globe, MessageSquare,
-  Clock, CalendarDays,
+  Clock, CalendarDays, Plus, RefreshCw, Edit3, Trash2, Check,
+  Ban, CircleSlash, Settings, Users, BriefcaseBusiness, WalletCards,
+  FileSignature, ListChecks, Bell, Mail,
 } from "lucide-react";
 import dvLogo from "../imports/Deja_Vu_DV.jpg";
 import dvStudiosLogo from "../imports/Deja_Vu_Deja_Vu_Studios-1.png";
@@ -435,15 +436,29 @@ function scrollTo(id: string) {
 
 const SUPABASE_URL  = "https://lboovczhagqnzcyclzbl.supabase.co";
 const SUPABASE_ANON = "sb_publishable_c0ebXJ9F_jaBdWrXwlsXTA_G0Fo39-A";
+const SERVER = String(import.meta.env.VITE_DEJAVU_API_URL || "/api/v1").replace(/\/+$/, "");
+const AUTH_TOKEN_KEY = "dv-session-token";
+const AUTH_USER_KEY = "dv-session-user";
 // Singleton with custom storageKey to avoid colliding with the platform's own client
 const supabase: ReturnType<typeof createClient> =
   (globalThis as any).__dvSupabase ??= createClient(SUPABASE_URL, SUPABASE_ANON, {
     auth: { storageKey: "dv-os-auth" },
   });
 
+type AuthUser = {
+  id: string;
+  email?: string | null;
+  display_name?: string;
+  full_name?: string | null;
+  is_active?: boolean;
+  avatar_url?: string | null;
+  user_roles?: any[];
+  user_programs?: any[];
+};
+
 type AuthCtx = {
-  session: Session | null;
-  user: User | null;
+  session: { access_token: string; user: AuthUser } | null;
+  user: AuthUser | null;
   authLoading: boolean;
   signIn: (email: string, password: string) => Promise<string | null>;
   signOut: () => Promise<void>;
@@ -455,27 +470,115 @@ const AuthContext = createContext<AuthCtx>({
 const useAuth = () => useContext(AuthContext);
 
 function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [session, setSession] = useState<Session | null>(null);
-  const [user, setUser]       = useState<User | null>(null);
+  const [session, setSession] = useState<AuthCtx["session"]>(null);
+  const [user, setUser]       = useState<AuthCtx["user"]>(null);
   const [authLoading, setLoading] = useState(true);
+
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session); setUser(data.session?.user ?? null); setLoading(false);
-    });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_ev, s) => {
-      setSession(s); setUser(s?.user ?? null);
-    });
-    return () => subscription.unsubscribe();
+    let cancelled = false;
+    // Keep authentication scoped to the current browser session. Migrate an
+    // existing local-storage session once so current users are not logged out.
+    const legacyToken = window.localStorage.getItem("dv-local-token");
+    const legacyUser = window.localStorage.getItem("dv-local-user");
+    if (legacyToken) window.sessionStorage.setItem(AUTH_TOKEN_KEY, legacyToken);
+    if (legacyUser) window.sessionStorage.setItem(AUTH_USER_KEY, legacyUser);
+    window.localStorage.removeItem("dv-local-token");
+    window.localStorage.removeItem("dv-local-user");
+
+    const token = window.sessionStorage.getItem(AUTH_TOKEN_KEY);
+    const savedUser = window.sessionStorage.getItem(AUTH_USER_KEY);
+    if (!token) {
+      setLoading(false);
+      return;
+    }
+
+    fetch(`${SERVER}/auth/me`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("Session expired")))
+      .then((data) => {
+        if (cancelled) return;
+        const localUser = {
+          id: data.user?.id || JSON.parse(savedUser || "{}").id || "local-user",
+          email: data.user?.email || JSON.parse(savedUser || "{}").email || null,
+          display_name: data.user?.display_name || JSON.parse(savedUser || "{}").display_name || data.user?.email || "User",
+          full_name: data.user?.full_name || JSON.parse(savedUser || "{}").full_name || null,
+          is_active: data.user?.is_active !== false,
+          avatar_url: data.user?.avatar_url || JSON.parse(savedUser || "{}").avatar_url || null,
+          user_roles: data.user?.user_roles || JSON.parse(savedUser || "{}").user_roles || [],
+          user_programs: data.user?.user_programs || JSON.parse(savedUser || "{}").user_programs || [],
+        };
+        setUser(localUser);
+        setSession({ access_token: token, user: localUser });
+      })
+      .catch(() => {
+        window.sessionStorage.removeItem(AUTH_TOKEN_KEY);
+        window.sessionStorage.removeItem(AUTH_USER_KEY);
+        if (!cancelled) {
+          setUser(null);
+          setSession(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => { cancelled = true; };
   }, []);
+
   const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    return error ? error.message : null;
+    try {
+      const response = await fetch(`${SERVER}/auth/email/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) return data.error || "Onjuiste inloggegevens.";
+
+      const localUser = {
+        id: data.user?.id || "local-user",
+        email: data.user?.email || email,
+        display_name: data.user?.display_name || email,
+        full_name: data.user?.full_name || null,
+        is_active: data.user?.is_active !== false,
+        avatar_url: data.user?.avatar_url || null,
+        user_roles: data.user?.user_roles || [],
+        user_programs: data.user?.user_programs || [],
+      };
+      window.sessionStorage.setItem(AUTH_TOKEN_KEY, data.token);
+      window.sessionStorage.setItem(AUTH_USER_KEY, JSON.stringify(localUser));
+      setUser(localUser);
+      setSession({ access_token: data.token, user: localUser });
+      return null;
+    } catch {
+      return `Kan geen verbinding maken met de server (${SERVER}). Probeer het opnieuw of neem contact op met de beheerder.`;
+    }
   };
-  const signOut = async () => { await supabase.auth.signOut(); };
+
+  const signOut = async () => {
+    const token = window.sessionStorage.getItem(AUTH_TOKEN_KEY);
+    if (token) {
+      await fetch(`${SERVER}/auth/logout`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      }).catch(() => undefined);
+    }
+    window.sessionStorage.removeItem(AUTH_TOKEN_KEY);
+    window.sessionStorage.removeItem(AUTH_USER_KEY);
+    window.localStorage.removeItem("dv-local-token");
+    window.localStorage.removeItem("dv-local-user");
+    setUser(null);
+    setSession(null);
+  };
+
   return <AuthContext.Provider value={{ session, user, authLoading, signIn, signOut }}>{children}</AuthContext.Provider>;
 }
 
 const OpenLoginCtx = createContext<() => void>(() => {});
+
+function isAdminSession(session: AuthCtx["session"] | null, user?: AuthCtx["user"]) {
+  const source = user || session?.user;
+  return source?.user_roles?.some((entry) => entry?.role?.slug === "administrator") ?? false;
+}
 
 function Nav() {
   const [solid, setSolid] = useState(false);
@@ -485,7 +588,7 @@ function Nav() {
   const isHome = location.pathname === "/";
   const { session } = useAuth();
   const openLogin = useContext(OpenLoginCtx);
-  const handleLoginClick = () => session ? navigate("/dashboard") : openLogin();
+  const handleLoginClick = () => session ? navigate(isAdminSession(session) ? "/admin/dashboard" : "/dashboard") : openLogin();
 
   useEffect(() => {
     const fn = () => setSolid(window.scrollY > 80);
@@ -1745,14 +1848,29 @@ function Contact() {
                 e.preventDefault();
                 if (!form.naam || !form.email || !form.bericht) return;
                 setSending(true); setSendError(null);
-                const { error } = await supabase.from("contact_submissions").insert({
-                  naam: form.naam.trim(),
-                  email: form.email.trim().toLowerCase(),
-                  bericht: form.bericht.trim(),
-                });
-                setSending(false);
-                if (error) { setSendError("Er ging iets mis. Probeer het opnieuw of mail ons direct."); }
-                else { setSent(true); setForm({ naam: "", email: "", bericht: "" }); }
+                try {
+                  const response = await fetch(`${SERVER}/contact`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      naam: form.naam.trim(),
+                      email: form.email.trim().toLowerCase(),
+                      bericht: form.bericht.trim(),
+                    }),
+                  });
+                  const result = await response.json().catch(() => ({}));
+                  if (!response.ok) throw new Error(result?.error || "Contact request failed");
+                  if (result?.mail?.sent === false) {
+                    setForm({ naam: "", email: "", bericht: "" });
+                    setSendError("Je bericht is opgeslagen, maar de bevestigingsmail kon niet worden verstuurd. De studio heeft je aanvraag wel ontvangen.");
+                    return;
+                  }
+                  setSent(true); setForm({ naam: "", email: "", bericht: "" });
+                } catch {
+                  setSendError("Er ging iets mis. Probeer het opnieuw of mail ons direct.");
+                } finally {
+                  setSending(false);
+                }
               }}
             >
               {[
@@ -2392,15 +2510,18 @@ function DienstenPage() {
 
 // ─── LOGIN MODAL ─────────────────────────────────────────────────────────────
 
-function LoginModal({ onClose }: { onClose: () => void }) {
-  const { signIn, session } = useAuth();
+function LoginModal({ onClose, redirectTo }: { onClose: () => void; redirectTo?: string }) {
+  const { signIn, session, user } = useAuth();
   const navigate = useNavigate();
   const [email, setEmail]       = useState("");
   const [password, setPassword] = useState("");
   const [err, setErr]           = useState<string | null>(null);
   const [busy, setBusy]         = useState(false);
 
-  useEffect(() => { if (session) { navigate("/dashboard"); onClose(); } }, [session]);
+  useEffect(() => {
+    if (!session) return;
+    navigate(redirectTo || (isAdminSession(session, user) ? "/admin/dashboard" : "/dashboard"), { replace: true });
+  }, [session, user, redirectTo, navigate]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2471,12 +2592,24 @@ function Root() {
   );
 }
 
+function AdminLoginPage() {
+  const navigate = useNavigate();
+  return (
+    <>
+      <GlobalStyles />
+      <GrainOverlay />
+      <div className="min-h-screen" style={{ background: "#050505" }}>
+        <LoginModal onClose={() => navigate("/", { replace: true })} />
+      </div>
+    </>
+  );
+}
+
 // ─── DASHBOARD ───────────────────────────────────────────────────────────────
 
 const DB_GOLD    = "#C9A84C";
 const DB_SURFACE = "#111111";
 const DB_BORDER  = "rgba(201,168,76,0.12)";
-const SERVER     = "https://lboovczhagqnzcyclzbl.supabase.co/functions/v1/make-server-742d9a67";
 const apiFetch   = (path: string, opts?: RequestInit, token?: string) => {
   const key = token ?? SUPABASE_ANON;
   return fetch(`${SERVER}${path}`, {
@@ -2487,7 +2620,7 @@ const apiFetch   = (path: string, opts?: RequestInit, token?: string) => {
 
 type Profile = {
   id: string; organization_id: string; display_name: string; full_name: string | null;
-  email: string | null; is_active: boolean; auth_user_id?: string;
+  email: string | null; is_active: boolean; auth_user_id?: string; avatar_url?: string | null;
   user_roles?: { role: { name: string; slug: string } }[];
   user_programs?: { program: { name: string; slug: string } }[];
 };
@@ -2496,6 +2629,7 @@ type Booking = {
   duration_hours: number; notes: string | null; artist_id?: string;
   artist?: { display_name: string }; studio?: { id?: string; name: string };
   booking_type?: { name: string }; program?: { name: string } | null;
+  required_staff_label?: string;
   status?: { name: string; color: string; slug: string };
 };
 type StudioDB = {
@@ -2509,6 +2643,9 @@ type ServiceOption = {
 };
 type Service = {
   id: string; name: string; slug: string; description?: string;
+  duration_minutes?: number; available_durations?: number[];
+  is_active?: boolean; is_bookable?: boolean;
+  studio_required?: boolean; default_studio_id?: string;
   options?: ServiceOption[];
 };
 
@@ -2537,25 +2674,46 @@ const DEV_PROFILE: Profile = {
 
 function DashboardPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { session, signOut, authLoading } = useAuth();
   const devMode = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("dev");
   const token = devMode ? SUPABASE_ANON : session?.access_token;
+  const dashboardModuleIds = DASH_MODULES.map((module) => module.id);
+  const moduleFromUrl = () => {
+    const requested = new URLSearchParams(window.location.search).get("module") || "dashboard";
+    return dashboardModuleIds.includes(requested) ? requested : "dashboard";
+  };
 
   // Redirect to home if not authenticated (skip in dev mode)
   useEffect(() => {
     if (!devMode && !authLoading && !session) navigate("/");
   }, [authLoading, session, devMode]);
 
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(() => typeof window === "undefined" || window.innerWidth >= 768);
   const [overview, setOverview] = useState<{ totalProfiles: number; totalBookings: number; recentBookings: Booking[]; profiles: Profile[] } | null>(null);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [loadingOverview, setLoadingOverview] = useState(true);
-  const [myProfile, setMyProfile] = useState<Profile | null>(null);
+  const [myProfile, setMyProfile] = useState<Profile | null>(() => session?.user ? session.user as Profile : null);
 
   const isAdmin = (devMode ? DEV_PROFILE : myProfile)?.user_roles?.some(r => r.role.slug === "administrator") ?? false;
 
-  const [activeModule, setModule] = useState("dashboard");
+  const [activeModule, setModule] = useState(moduleFromUrl);
+  const selectModule = (moduleId: string) => {
+    const safeModule = dashboardModuleIds.includes(moduleId) ? moduleId : "dashboard";
+    setModule(safeModule);
+    const params = new URLSearchParams(window.location.search);
+    if (safeModule !== "boekingen") params.delete("new");
+    if (safeModule === "dashboard") params.delete("module");
+    else params.set("module", safeModule);
+    const nextSearch = params.toString();
+    navigate(`/dashboard${nextSearch ? `?${nextSearch}` : ""}`, { replace: true });
+  };
+
+  useEffect(() => {
+    const nextModule = moduleFromUrl();
+    setModule((current) => current === nextModule ? current : nextModule);
+  }, [location.search]);
   const [selectedProfile, setSelectedProfile] = useState<Profile | null>(null);
   const [loadingProfiles, setLoadingProfiles] = useState(false);
   const [loadingBookings, setLoadingBookings] = useState(false);
@@ -2574,39 +2732,61 @@ function DashboardPage() {
     if (!token || !session?.user?.id) return;
     const authUserId = session.user.id;
     const authEmail = session.user.email?.toLowerCase();
+    const sessionProfile = session.user as Profile;
+    const sessionIsAdmin = sessionProfile.user_roles?.some(r => r.role.slug === "administrator") ?? false;
 
-    setLoadingOverview(true);
-    apiFetch(`/dashboard/overview`, {}, token)
-      .then(r => r.json())
-      .then(d => { setOverview(d); setLoadingOverview(false); })
-      .catch(() => setLoadingOverview(false));
+    // /auth/me already returns the caller's complete public profile. Use it
+    // immediately so artists never depend on the admin-only profile directory.
+    setMyProfile(sessionProfile);
+    setMyProfileLoaded(true);
 
-    // Load all profiles, then identify own profile by matching session auth UUID
-    setLoadingProfiles(true);
-    apiFetch(`/profiles`, {}, token)
-      .then(r => r.json())
-      .then((d: Profile[]) => {
-        if (Array.isArray(d)) {
-          setProfiles(d);
-          const own = d.find(p => p.auth_user_id === authUserId)
-            ?? d.find(p => p.email?.toLowerCase() === authEmail)
-            ?? null;
-          setMyProfile(own);
-        }
-        setLoadingProfiles(false);
-        setMyProfileLoaded(true);
-      })
-      .catch(() => { setLoadingProfiles(false); setMyProfileLoaded(true); });
+    if (sessionIsAdmin) {
+      setLoadingOverview(true);
+      apiFetch(`/dashboard/overview`, {}, token)
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+        .then(d => { setOverview(d); setLoadingOverview(false); })
+        .catch(() => setLoadingOverview(false));
+    } else {
+      setOverview(null);
+      setLoadingOverview(false);
+    }
+
+    if (sessionIsAdmin) {
+      // Administrators may load the complete profile directory.
+      setLoadingProfiles(true);
+      apiFetch(`/profiles`, {}, token)
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+        .then((d: Profile[]) => {
+          if (Array.isArray(d)) {
+            setProfiles(d);
+            const own = d.find(p => p.auth_user_id === authUserId)
+              ?? d.find(p => p.id === authUserId)
+              ?? d.find(p => p.email?.toLowerCase() === authEmail)
+              ?? sessionProfile;
+            setMyProfile(own);
+          }
+          setLoadingProfiles(false);
+        })
+        .catch(() => setLoadingProfiles(false));
+    } else {
+      setProfiles([sessionProfile]);
+      setLoadingProfiles(false);
+      setDbPrograms((sessionProfile.user_programs || []).map((entry, index) => ({
+        id: entry.program.slug || `program-${index}`,
+        name: entry.program.name,
+        slug: entry.program.slug,
+      })));
+    }
 
     apiFetch(`/studios`, {}, token).then(r => r.json()).then(d => Array.isArray(d) && setDbStudios(d)).catch(() => {});
     apiFetch(`/booking-types`, {}, token).then(r => r.json()).then(d => Array.isArray(d) && setDbBookingTypes(d)).catch(() => {});
-    apiFetch(`/programs`, {}, token).then(r => r.json()).then(d => Array.isArray(d) && setDbPrograms(d)).catch(() => {});
+    if (sessionIsAdmin) apiFetch(`/programs`, {}, token).then(r => r.json()).then(d => Array.isArray(d) && setDbPrograms(d)).catch(() => {});
     apiFetch(`/services`, {}, token).then(r => r.json()).then(d => Array.isArray(d) && setDbServices(d)).catch(() => {});
   }, [token, session?.user?.id]);
 
   // Load bookings when on boekingen/agenda tab
   useEffect(() => {
-    if (!token || !["boekingen", "agenda", "artiesten", "studios"].includes(activeModule)) return;
+    if (!token || !["dashboard", "boekingen", "agenda", "artiesten", "studios"].includes(activeModule)) return;
     if (bookings.length > 0) return;
     setLoadingBookings(true);
     apiFetch(`/bookings`, {}, token)
@@ -2617,7 +2797,7 @@ function DashboardPage() {
 
   // Load wallets when on profiel or wallet tab
   useEffect(() => {
-    if (!token || !["profiel", "wallet"].includes(activeModule)) return;
+    if (!token || !["dashboard", "profiel", "wallet"].includes(activeModule)) return;
     const ownProfile = devMode ? DEV_PROFILE : myProfile;
     const targets = isAdmin ? profiles : (ownProfile ? [ownProfile] : []);
     targets.forEach(p => {
@@ -2662,6 +2842,8 @@ function DashboardPage() {
   // In dev mode, skip auth and use a mock admin profile
   const effectiveMyProfile = devMode ? DEV_PROFILE : myProfile;
   const effectiveMyProfileLoaded = devMode ? true : myProfileLoaded;
+  const effectiveRoleSlugs = effectiveMyProfile?.user_roles?.map(entry => entry.role.slug) ?? [];
+  const canManageAvailability = effectiveRoleSlugs.some(role => ["administrator", "engineer", "beatmaker", "film-director-cameraman"].includes(role));
 
   if (!devMode && (authLoading || !effectiveMyProfileLoaded)) {
     return (
@@ -2703,7 +2885,7 @@ function DashboardPage() {
   return (
     <div className="flex h-screen overflow-hidden" style={{ background: "#0A0A0A", fontFamily: "'Outfit', sans-serif" }}>
       {/* Sidebar */}
-      <aside className="flex flex-col shrink-0 transition-all duration-300"
+      <aside className={`flex flex-col shrink-0 transition-all duration-300 ${sidebarOpen ? "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-40" : ""}`}
         style={{ width: sidebarOpen ? 220 : 64, borderRight: `1px solid ${DB_BORDER}`, background: DB_SURFACE }}>
         <div className="flex items-center gap-3 px-4 h-16 shrink-0" style={{ borderBottom: `1px solid ${DB_BORDER}` }}>
           <img src={dvLogo} alt="DV" className="w-7 h-7 rounded-full object-cover shrink-0" style={{ opacity: 0.85 }} />
@@ -2712,11 +2894,12 @@ function DashboardPage() {
         <nav className="flex flex-col gap-0.5 p-2 flex-1 overflow-y-auto">
           {DASH_MODULES.filter(m => {
             if (isAdmin) return true;
-            return ["dashboard", "boekingen", "agenda", "wallet", "beschikbaarheid", "profiel"].includes(m.id);
+            if (m.id === "beschikbaarheid") return canManageAvailability;
+            return ["dashboard", "boekingen", "agenda", "wallet", "profiel"].includes(m.id);
           }).map(({ id, label, icon: Icon }) => {
             const active = activeModule === id;
             return (
-              <button key={id} onClick={() => setModule(id)}
+              <button key={id} onClick={() => selectModule(id)}
                 className="flex items-center gap-3 px-3 py-2.5 rounded transition-all duration-200 text-left"
                 style={{ background: active ? "rgba(201,168,76,0.1)" : "transparent", color: active ? DB_GOLD : "rgba(240,237,230,0.4)", borderLeft: active ? `2px solid ${DB_GOLD}` : "2px solid transparent" }}
                 onMouseEnter={(e) => { if (!active) e.currentTarget.style.color = "rgba(240,237,230,0.75)"; }}
@@ -2782,8 +2965,8 @@ function DashboardPage() {
           </div>
         </div>
         <div className="flex-1 overflow-y-auto p-6 md:p-8">
-          {activeModule === "dashboard"       && <DashOverview data={overview} loading={loadingOverview} profiles={profiles} loadingProfiles={loadingProfiles} studios={dbStudios} programs={dbPrograms} isAdmin={isAdmin} myProfile={effectiveMyProfile} />}
-          {activeModule === "boekingen"       && <DashBoekingen bookings={bookings} loading={loadingBookings} profiles={profiles} studios={dbStudios} services={dbServices} onBookingAdded={b => setBookings(prev => [b, ...prev])} isAdmin={isAdmin} myProfile={effectiveMyProfile} token={token} />}
+          {activeModule === "dashboard"       && <DashOverview data={overview} loading={loadingOverview} profiles={profiles} loadingProfiles={loadingProfiles} studios={dbStudios} programs={dbPrograms} bookings={bookings} wallets={wallets} isAdmin={isAdmin} myProfile={effectiveMyProfile} onModuleSelect={selectModule} onNewBooking={() => navigate("/dashboard?module=boekingen&new=1")} />}
+          {activeModule === "boekingen"       && <DashBoekingen bookings={bookings} loading={loadingBookings} profiles={profiles} studios={dbStudios} services={dbServices} onBookingAdded={b => setBookings(prev => [b, ...prev])} onBookingUpdated={b => setBookings(prev => prev.map(row => row.id === b.id ? b : row))} isAdmin={isAdmin} myProfile={effectiveMyProfile} token={token} />}
           {activeModule === "agenda"          && <DashAgenda bookings={bookings} loading={loadingBookings} profiles={profiles} isAdmin={isAdmin} myProfile={effectiveMyProfile} />}
           {activeModule === "artiesten"       && <DashArtiesten profiles={profiles} loading={loadingProfiles} bookings={bookings} />}
           {activeModule === "medewerkers"     && <DashMedewerkers profiles={profiles} loading={loadingProfiles} />}
@@ -2799,11 +2982,15 @@ function DashboardPage() {
   );
 }
 
-function DashOverview({ data, loading, profiles, loadingProfiles, studios, programs, isAdmin, myProfile }: {
+function DashOverview({ data, loading, profiles, loadingProfiles, studios, programs, bookings, wallets, isAdmin, myProfile, onModuleSelect, onNewBooking }: {
   data: any; loading: boolean; profiles: Profile[]; loadingProfiles: boolean;
   studios: StudioDB[];
   programs: { id: string; name: string }[];
+  bookings: Booking[];
+  wallets: Record<string, { hours_total: number; hours_used: number; hours_remaining: number; split_used: boolean; program: { name: string } }[]>;
   isAdmin: boolean; myProfile: Profile | null;
+  onModuleSelect: (moduleId: string) => void;
+  onNewBooking: () => void;
 }) {
   const activeStudios = studios.filter(s => s.is_active);
   const bookableStudios = studios.filter(s => s.is_bookable && s.is_active);
@@ -2812,17 +2999,28 @@ function DashOverview({ data, loading, profiles, loadingProfiles, studios, progr
 
   const todayStr = new Date().toISOString().split("T")[0];
   const todayBookings = (data?.recentBookings ?? []).filter((b: Booking) => b.date === todayStr);
+  const ownBookings = bookings
+    .filter((booking) => booking.artist_id === myProfile?.id || booking.artist?.display_name === myProfile?.display_name)
+    .sort((a, b) => `${a.date} ${a.start_time}`.localeCompare(`${b.date} ${b.start_time}`));
+  const upcomingBookings = ownBookings.filter((booking) => booking.date >= todayStr && !["cancelled", "completed", "no_show"].includes(booking.status?.slug || ""));
+  const nextBooking = upcomingBookings[0];
+  const pendingBookings = upcomingBookings.filter((booking) => booking.status?.slug === "pending");
+  const ownWallet = myProfile ? wallets[myProfile.id]?.[0] : undefined;
+  const hoursRemaining = ownWallet?.hours_remaining ?? 0;
+  const hoursTotal = ownWallet?.hours_total ?? 0;
+  const hoursUsed = ownWallet?.hours_used ?? 0;
 
   const adminStats = [
-    { label: "Gebruikers",   value: profiles.length || (data?.totalProfiles ?? "—"), sub: "actieve profielen" },
-    { label: "Boekingen",    value: data?.totalBookings ?? 0,                         sub: "totaal" },
-    { label: "Studio's",     value: loading ? "—" : activeStudios.length,             sub: `${bookableStudios.length} boekbaar` },
-    { label: "Programma's",  value: loading ? "—" : programs.length,                  sub: programs.length > 0 ? "actief" : "—" },
+    { label: "Gebruikers",   value: profiles.length || (data?.totalProfiles ?? "—"), sub: "actieve profielen", target: "artiesten" },
+    { label: "Boekingen",    value: data?.totalBookings ?? 0,                         sub: "totaal", target: "boekingen" },
+    { label: "Studio's",     value: loading ? "—" : activeStudios.length,             sub: `${bookableStudios.length} boekbaar`, target: "studios" },
+    { label: "Programma's",  value: loading ? "—" : programs.length,                  sub: programs.length > 0 ? "actief" : "—", target: "programmas" },
   ];
   const artistStats = [
-    { label: "Rollen",       value: myRoles.length || "—",         sub: myRoles[0] ?? "artiest" },
-    { label: "Programma's",  value: myPrograms.length || "—",      sub: myPrograms[0] ?? "geen" },
-    { label: "Boekbaar",     value: loading ? "—" : bookableStudios.length, sub: "studio's beschikbaar" },
+    { label: "Komende sessies", value: upcomingBookings.length, sub: nextBooking ? `${nextBooking.date} · ${nextBooking.start_time?.slice(0,5)}` : "niets gepland", target: "agenda" },
+    { label: "Wacht op bevestiging", value: pendingBookings.length, sub: pendingBookings.length === 1 ? "sessie pending" : "sessies pending", target: "boekingen" },
+    { label: "Uren beschikbaar", value: ownWallet ? hoursRemaining : "—", sub: ownWallet ? `${hoursUsed} van ${hoursTotal} gebruikt` : "geen urenpakket", target: "wallet" },
+    { label: "Boekbare studio's", value: loading ? "—" : bookableStudios.length, sub: "nu beschikbaar", target: "boekingen" },
   ];
   const stats = isAdmin ? adminStats : artistStats;
 
@@ -2838,11 +3036,20 @@ function DashOverview({ data, loading, profiles, loadingProfiles, studios, progr
       {/* KPI grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {stats.map(s => (
-          <div key={s.label} className="p-5 rounded" style={{ background: DB_SURFACE, border: `1px solid ${DB_BORDER}` }}>
+          <button
+            key={s.label}
+            type="button"
+            onClick={() => onModuleSelect(s.target)}
+            className="group p-5 rounded-xl text-left transition-all hover:-translate-y-1 focus:outline-none focus:ring-2"
+            style={{ background: DB_SURFACE, border: `1px solid ${DB_BORDER}`, color: WHITE }}
+          >
             <p className="text-[10px] tracking-[0.3em] uppercase mb-3" style={{ color: "rgba(240,237,230,0.35)" }}>{s.label}</p>
             <p className="font-display font-normal text-3xl mb-1" style={{ color: loading ? "rgba(201,168,76,0.4)" : DB_GOLD }}>{s.value}</p>
-            <p className="text-[10px]" style={{ color: "rgba(240,237,230,0.3)" }}>{s.sub}</p>
-          </div>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[10px]" style={{ color: "rgba(240,237,230,0.3)" }}>{s.sub}</p>
+              <span className="text-[10px] font-semibold opacity-0 transition-opacity group-hover:opacity-100" style={{ color: DB_GOLD }}>Open →</span>
+            </div>
+          </button>
         ))}
       </div>
 
@@ -2909,36 +3116,74 @@ function DashOverview({ data, loading, profiles, loadingProfiles, studios, progr
       )}
 
       {!isAdmin && myProfile && (
-        <div className="p-6 rounded space-y-3" style={{ background: DB_SURFACE, border: `1px solid ${DB_BORDER}` }}>
-          <p className="text-[10px] tracking-[0.3em] uppercase mb-4" style={{ color: DB_GOLD }}>Mijn profiel</p>
-          <div className="flex items-center gap-4">
-            <div className="w-12 h-12 rounded-full flex items-center justify-center font-display text-lg"
-              style={{ background: "rgba(201,168,76,0.12)", color: DB_GOLD }}>
-              {myProfile.display_name.slice(0, 2).toUpperCase()}
+        <div className="grid gap-5 xl:grid-cols-[1.45fr_0.8fr]">
+          <section className="overflow-hidden rounded-2xl border" style={{ background: "linear-gradient(145deg, rgba(20,19,15,0.98), #0D0D0D)", borderColor: DB_BORDER }}>
+            <div className="flex flex-wrap items-start justify-between gap-4 p-6" style={{ borderBottom: `1px solid ${DB_BORDER}` }}>
+              <div>
+                <p className="text-[10px] tracking-[0.34em] uppercase" style={{ color: DB_GOLD }}>Next on your calendar</p>
+                <h3 className="mt-2 font-display text-2xl" style={{ color: "rgba(240,237,230,0.94)" }}>{nextBooking ? "Your next studio session" : "Your calendar is clear"}</h3>
+                <p className="mt-1 text-[12px]" style={{ color: "rgba(240,237,230,0.44)" }}>{nextBooking ? "Everything you need for the next booking, at a glance." : "Book a studio session when you are ready."}</p>
+              </div>
+              <button onClick={() => nextBooking ? onModuleSelect("agenda") : onNewBooking()} className="rounded-xl border px-4 py-2 text-[11px] font-semibold transition-all hover:-translate-y-0.5" style={{ borderColor: "rgba(201,168,76,0.28)", color: DB_GOLD, background: "rgba(201,168,76,0.07)" }}>
+                {nextBooking ? "Open agenda" : "Book a session"} →
+              </button>
             </div>
-            <div>
-              <p className="text-[15px]" style={{ color: "rgba(240,237,230,0.9)" }}>{myProfile.display_name}</p>
-              <div className="flex flex-wrap gap-1 mt-1">
-                {myProfile.user_roles?.map(r => (
-                  <span key={r.role.slug} className="text-[9px] tracking-[0.2em] uppercase px-2 py-0.5 rounded-full"
-                    style={{ background: "rgba(201,168,76,0.08)", color: DB_GOLD }}>{r.role.name}</span>
-                ))}
+            {nextBooking ? (
+              <button type="button" onClick={() => onModuleSelect("agenda")} className="grid w-full gap-4 p-6 text-left sm:grid-cols-[92px_1fr_auto] sm:items-center transition-colors hover:bg-[rgba(201,168,76,0.035)]">
+                <div className="rounded-xl p-4 text-center" style={{ background: "rgba(201,168,76,0.09)", border: "1px solid rgba(201,168,76,0.15)" }}>
+                  <p className="text-[10px] uppercase tracking-[0.24em]" style={{ color: "rgba(240,237,230,0.45)" }}>{new Date(`${nextBooking.date}T12:00`).toLocaleDateString("nl-NL", { month: "short" })}</p>
+                  <p className="font-display text-3xl leading-none" style={{ color: DB_GOLD }}>{new Date(`${nextBooking.date}T12:00`).getDate()}</p>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-base font-semibold" style={{ color: "rgba(240,237,230,0.9)" }}>{nextBooking.booking_type?.name || "Studio session"}</p>
+                  <p className="mt-1 text-sm" style={{ color: "rgba(240,237,230,0.5)" }}>{nextBooking.studio?.name || "Studio"} · {nextBooking.start_time?.slice(0,5)}–{nextBooking.end_time?.slice(0,5)}</p>
+                  <p className="mt-2 text-[11px]" style={{ color: "rgba(240,237,230,0.36)" }}>Staff: {nextBooking.required_staff_label || "No additional staff"}</p>
+                </div>
+                <span className="w-fit rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]" style={{ background: `${nextBooking.status?.color || DB_GOLD}18`, color: nextBooking.status?.color || DB_GOLD, border: `1px solid ${nextBooking.status?.color || DB_GOLD}30` }}>
+                  {nextBooking.status?.name || "Pending"}
+                </span>
+              </button>
+            ) : (
+              <div className="p-8 text-center text-sm" style={{ color: "rgba(240,237,230,0.38)" }}>No upcoming sessions.</div>
+            )}
+          </section>
+
+          <aside className="rounded-2xl border p-6" style={{ background: DB_SURFACE, borderColor: DB_BORDER }}>
+            <div className="flex items-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-full font-display" style={{ background: "rgba(201,168,76,0.12)", color: DB_GOLD }}>{myProfile.display_name.slice(0, 2).toUpperCase()}</div>
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold" style={{ color: "rgba(240,237,230,0.9)" }}>{myProfile.display_name}</p>
+                <p className="text-[10px] uppercase tracking-[0.24em]" style={{ color: "rgba(240,237,230,0.36)" }}>{myRoles.join(" · ") || "Artist"}</p>
               </div>
             </div>
-          </div>
-          {myPrograms.length > 0 && (
-            <div className="pt-3" style={{ borderTop: `1px solid ${DB_BORDER}` }}>
-              <p className="text-[9px] tracking-[0.25em] uppercase mb-2" style={{ color: "rgba(240,237,230,0.25)" }}>Programma's</p>
-              <div className="flex flex-wrap gap-2">
-                {myPrograms.map(name => (
-                  <span key={name} className="text-[10px] tracking-[0.2em] uppercase px-3 py-1.5 rounded"
-                    style={{ background: "rgba(201,168,76,0.06)", color: "rgba(240,237,230,0.5)", border: "1px solid rgba(201,168,76,0.12)" }}>
-                    {name}
-                  </span>
+            <div className="my-5 h-px" style={{ background: DB_BORDER }} />
+            <p className="text-[9px] uppercase tracking-[0.28em]" style={{ color: "rgba(240,237,230,0.3)" }}>Program</p>
+            <p className="mt-2 text-sm" style={{ color: DB_GOLD }}>{myPrograms.join(", ") || "No program assigned"}</p>
+            <p className="mt-5 text-[9px] uppercase tracking-[0.28em]" style={{ color: "rgba(240,237,230,0.3)" }}>Account status</p>
+            <div className="mt-2 flex items-center gap-2 text-sm" style={{ color: "#4ADE80" }}><span className="h-2 w-2 rounded-full bg-green-400" /> Active</div>
+            <button onClick={() => onModuleSelect("profiel")} className="mt-6 w-full rounded-xl border py-2.5 text-[11px] font-semibold" style={{ borderColor: DB_BORDER, color: "rgba(240,237,230,0.66)" }}>View profile →</button>
+          </aside>
+
+          <section className="rounded-2xl border p-6 xl:col-span-2" style={{ background: DB_SURFACE, borderColor: DB_BORDER }}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-[10px] tracking-[0.34em] uppercase" style={{ color: DB_GOLD }}>Studio time this month</p>
+                <p className="mt-1 text-sm" style={{ color: "rgba(240,237,230,0.45)" }}>Allocated, used and remaining hours from your current program.</p>
+              </div>
+              <button onClick={() => onModuleSelect("wallet")} className="text-[11px] font-semibold" style={{ color: DB_GOLD }}>View details →</button>
+            </div>
+            {ownWallet ? (
+              <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                {[{ label: "Allocated", value: hoursTotal }, { label: "Used", value: hoursUsed }, { label: "Remaining", value: hoursRemaining }].map((item) => (
+                  <div key={item.label} className="rounded-xl border p-4" style={{ background: "#0A0A0A", borderColor: DB_BORDER }}>
+                    <p className="text-[9px] uppercase tracking-[0.24em]" style={{ color: "rgba(240,237,230,0.32)" }}>{item.label}</p>
+                    <p className="mt-2 font-display text-3xl" style={{ color: item.label === "Remaining" ? DB_GOLD : "rgba(240,237,230,0.86)" }}>{item.value}</p>
+                    <p className="text-[10px]" style={{ color: "rgba(240,237,230,0.3)" }}>hours</p>
+                  </div>
                 ))}
               </div>
-            </div>
-          )}
+            ) : <p className="mt-5 text-sm" style={{ color: "rgba(240,237,230,0.38)" }}>No studio-hour allocation found.</p>}
+          </section>
         </div>
       )}
     </div>
@@ -2968,6 +3213,7 @@ function BookingWizard({ profiles, studios, services, onBookingAdded, isAdmin, m
 
   const artists = profiles.filter(p => p.user_roles?.some(r => r.role.slug === "artist"));
   const bookableStudios = studios.filter(s => s.is_bookable && s.is_active);
+  const bookableServices = services.filter(s => s.is_active !== false && s.is_bookable !== false);
   const allResourceRoles = selService?.options ?? [];
   const today = new Date().toISOString().split("T")[0];
 
@@ -3077,12 +3323,12 @@ function BookingWizard({ profiles, studios, services, onBookingAdded, isAdmin, m
       {step === 0 && (
         <div className="space-y-3">
           <p className="text-[10px] tracking-[0.3em] uppercase" style={{ color: "rgba(240,237,230,0.35)" }}>Kies een service</p>
-          {!services.length ? (
+          {!bookableServices.length ? (
             <p className="text-[11px]" style={{ color: "rgba(240,237,230,0.25)" }}>Geen services in database — voer de migratie uit en deploy de edge function.</p>
           ) : (
             <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {services.map(s => (
-                <button key={s.id} onClick={() => { setSelService(s); goNext(); }}
+              {bookableServices.map(s => (
+                <button key={s.id} onClick={() => { setSelService(s); setSelDuration((s.available_durations?.[0] || s.duration_minutes || 120) / 60); goNext(); }}
                   className="p-5 rounded text-left transition-all"
                   style={{ background: selService?.id === s.id ? "rgba(201,168,76,0.1)" : "rgba(0,0,0,0.4)", border: `1px solid ${selService?.id === s.id ? DB_GOLD : DB_BORDER}` }}>
                   <p className="text-[13px] mb-1.5" style={{ color: "rgba(240,237,230,0.9)" }}>{s.name}</p>
@@ -3213,7 +3459,7 @@ function BookingWizard({ profiles, studios, services, onBookingAdded, isAdmin, m
           <div className="flex items-center gap-4 flex-wrap">
             <p className="text-[10px] tracking-[0.3em] uppercase" style={{ color: "rgba(240,237,230,0.35)" }}>Kies een tijdslot</p>
             <div className="flex items-center gap-1.5">
-              {[2, 4].map(dur => (
+              {(selService?.available_durations?.length ? selService.available_durations.map(minutes => minutes / 60) : [((selService?.duration_minutes || 120) / 60)]).map(dur => (
                 <button key={dur} onClick={() => { setSelDuration(dur); setSelSlot(""); }}
                   className="text-[10px] tracking-[0.2em] uppercase px-3 py-1.5 rounded transition-all"
                   style={{ background: selDuration === dur ? "rgba(201,168,76,0.12)" : "transparent", color: selDuration === dur ? DB_GOLD : "rgba(240,237,230,0.4)", border: `1px solid ${selDuration === dur ? "rgba(201,168,76,0.3)" : "rgba(240,237,230,0.1)"}` }}>
@@ -3367,14 +3613,29 @@ function BookingWizard({ profiles, studios, services, onBookingAdded, isAdmin, m
   );
 }
 
-function DashBoekingen({ bookings, loading, profiles, studios, services, onBookingAdded, isAdmin, myProfile, token }: {
+function DashBoekingen({ bookings, loading, profiles, studios, services, onBookingAdded, onBookingUpdated, isAdmin, myProfile, token }: {
   bookings: Booking[]; loading: boolean; profiles: Profile[];
   studios: StudioDB[]; services: Service[];
   onBookingAdded: (b: Booking) => void;
+  onBookingUpdated: (b: Booking) => void;
   isAdmin: boolean; myProfile: Profile | null; token?: string;
 }) {
-  const [showWizard, setShowWizard] = useState(false);
+  const location = useLocation();
+  const [showWizard, setShowWizard] = useState(() => new URLSearchParams(location.search).get("new") === "1");
+  const [actionError, setActionError] = useState("");
   const myBookings = isAdmin ? bookings : bookings.filter(b => b.artist_id === myProfile?.id || b.artist?.display_name === myProfile?.display_name);
+
+  const cancelOwnBooking = async (booking: Booking) => {
+    if (!token || booking.status?.slug === "cancelled") return;
+    setActionError("");
+    const response = await apiFetch(`/bookings/${booking.id}/cancelled`, { method: "POST", body: "{}" }, token);
+    const body = await response.json().catch(() => null);
+    if (!response.ok) {
+      setActionError(body?.error || `Unable to cancel booking (HTTP ${response.status}).`);
+      return;
+    }
+    onBookingUpdated(body);
+  };
 
   return (
     <div className="space-y-6 max-w-5xl">
@@ -3400,13 +3661,15 @@ function DashBoekingen({ bookings, loading, profiles, studios, services, onBooki
         </div>
       )}
 
+      {actionError && <AdminNotice tone="warn" text={actionError} />}
+
       {loading ? (
         <p className="text-[11px]" style={{ color: "rgba(240,237,230,0.25)" }}>Laden…</p>
       ) : !myBookings.length ? (
         <div className="p-6 rounded text-center text-[11px]" style={{ border: "1px dashed rgba(201,168,76,0.15)", color: "rgba(240,237,230,0.3)" }}>
           {isAdmin ? "Nog geen boekingen." : "Geen sessies gevonden. Plan hierboven je eerste sessie."}
         </div>
-      ) : <BookingTable bookings={myBookings} />}
+      ) : <BookingTable bookings={myBookings} onCancel={!isAdmin ? cancelOwnBooking : undefined} />}
     </div>
   );
 }
@@ -3443,6 +3706,18 @@ function DashAgenda({ bookings, loading, profiles, isAdmin, myProfile }: { booki
   const monthLabel = monthDate.toLocaleDateString("nl-NL", { month: "long", year: "numeric" });
   const weekLabel = `${weekDays[0].toLocaleDateString("nl-NL", { day: "numeric", month: "short" })} – ${weekDays[6].toLocaleDateString("nl-NL", { day: "numeric", month: "short", year: "numeric" })}`;
   const DOW = ["Ma", "Di", "Wo", "Do", "Vr", "Za", "Zo"];
+  const activeRangeKeys = view === "week"
+    ? weekDays.map(d => d.toISOString().split("T")[0])
+    : monthCells.filter(Boolean) as string[];
+  const rangeBookings = visibleBookings.filter(b => activeRangeKeys.includes(b.date));
+  const upcomingBookings = visibleBookings
+    .filter(b => b.date >= todayStr && b.status?.slug !== "cancelled")
+    .sort((a, b) => `${a.date} ${a.start_time}`.localeCompare(`${b.date} ${b.start_time}`))
+    .slice(0, 4);
+  const studioCount = new Set(rangeBookings.map(b => b.studio?.name).filter(Boolean)).size;
+  const confirmedCount = rangeBookings.filter(b => b.status?.slug === "confirmed").length;
+  const pendingCount = rangeBookings.filter(b => b.status?.slug === "pending").length;
+  const rangeLabel = view === "week" ? "deze week" : "deze maand";
 
   const NavBtn = ({ onClick, children }: { onClick: () => void; children: React.ReactNode }) => (
     <button onClick={onClick} className="px-2.5 py-1.5 rounded transition-colors text-[11px]"
@@ -3486,6 +3761,21 @@ function DashAgenda({ bookings, loading, profiles, isAdmin, myProfile }: { booki
             </select>
           )}
         </div>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {[
+          { label: "Sessies", value: rangeBookings.length, sub: rangeLabel },
+          { label: "Confirmed", value: confirmedCount, sub: "vastgelegd" },
+          { label: "Pending", value: pendingCount, sub: "nog te bevestigen" },
+          { label: "Studio's", value: studioCount, sub: "in gebruik" },
+        ].map(card => (
+          <div key={card.label} className="rounded-xl p-4" style={{ background: "linear-gradient(145deg, rgba(201,168,76,0.08), rgba(17,17,17,0.96))", border: `1px solid ${DB_BORDER}` }}>
+            <p className="text-[9px] tracking-[0.28em] uppercase" style={{ color: "rgba(240,237,230,0.38)" }}>{card.label}</p>
+            <p className="mt-2 font-display text-3xl leading-none" style={{ color: DB_GOLD }}>{loading ? "—" : card.value}</p>
+            <p className="mt-1 text-[10px]" style={{ color: "rgba(240,237,230,0.35)" }}>{card.sub}</p>
+          </div>
+        ))}
       </div>
 
       {loading ? (
@@ -3535,6 +3825,14 @@ function DashAgenda({ bookings, loading, profiles, isAdmin, myProfile }: { booki
               );
             })}
           </div>
+          {!rangeBookings.length && (
+            <div className="mt-4 rounded-2xl p-5" style={{ background: "rgba(201,168,76,0.055)", border: "1px dashed rgba(201,168,76,0.22)" }}>
+              <p className="text-sm font-medium" style={{ color: "rgba(240,237,230,0.9)" }}>Geen sessies in deze week</p>
+              <p className="mt-1 text-[11px]" style={{ color: "rgba(240,237,230,0.45)" }}>
+                De agenda is niet kapot — er staan alleen geen boekingen in deze periode. Gebruik volgende/vorige week of bekijk de komende sessies hieronder.
+              </p>
+            </div>
+          )}
         </div>
       ) : (
         /* ── Month calendar ── */
@@ -3576,6 +3874,58 @@ function DashAgenda({ bookings, loading, profiles, isAdmin, myProfile }: { booki
         </div>
       )}
 
+      {!loading && (
+        <div className="rounded-2xl p-5" style={{ background: DB_SURFACE, border: `1px solid ${DB_BORDER}` }}>
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div>
+              <p className="text-[9px] tracking-[0.3em] uppercase" style={{ color: DB_GOLD }}>Planning</p>
+              <h3 className="font-display text-xl" style={{ color: "rgba(240,237,230,0.9)" }}>Komende sessies</h3>
+            </div>
+            <span className="rounded-full px-3 py-1 text-[10px]" style={{ background: "rgba(201,168,76,0.08)", color: DB_GOLD, border: "1px solid rgba(201,168,76,0.18)" }}>
+              {upcomingBookings.length} zichtbaar
+            </span>
+          </div>
+          {!upcomingBookings.length ? (
+            <div className="rounded-xl p-5 text-center" style={{ background: "#0A0A0A", border: "1px dashed rgba(201,168,76,0.16)", color: "rgba(240,237,230,0.38)" }}>
+              Nog geen komende boekingen. Maak een boeking aan via Boekingen.
+            </div>
+          ) : (
+            <div className="grid gap-3 md:grid-cols-2">
+              {upcomingBookings.map(b => {
+                const clr = b.status?.color ?? DB_GOLD;
+                return (
+                  <div key={b.id} className="rounded-xl p-4" style={{ background: "#0A0A0A", border: `1px solid ${DB_BORDER}` }}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium" style={{ color: "rgba(240,237,230,0.9)" }}>{b.booking_type?.name ?? "Studio session"}</p>
+                        <p className="mt-1 truncate text-[11px]" style={{ color: "rgba(240,237,230,0.45)" }}>{b.artist?.display_name ?? "Artist"} · {b.studio?.name ?? "Studio"}</p>
+                      </div>
+                      <span className="shrink-0 rounded-full px-2 py-1 text-[9px] tracking-[0.16em] uppercase" style={{ background: `${clr}14`, color: clr, border: `1px solid ${clr}30` }}>
+                        {b.status?.name ?? "Pending"}
+                      </span>
+                    </div>
+                    <div className="mt-4 grid grid-cols-2 gap-3 text-[11px]">
+                      <div>
+                        <p className="text-[9px] tracking-[0.24em] uppercase" style={{ color: "rgba(240,237,230,0.28)" }}>Date</p>
+                        <p style={{ color: DB_GOLD }}>{new Date(b.date + "T12:00").toLocaleDateString("nl-NL", { day: "numeric", month: "short" })}</p>
+                      </div>
+                      <div>
+                        <p className="text-[9px] tracking-[0.24em] uppercase" style={{ color: "rgba(240,237,230,0.28)" }}>Time</p>
+                        <p style={{ color: DB_GOLD }}>{b.start_time?.slice(0,5)} – {b.end_time?.slice(0,5)}</p>
+                      </div>
+                    </div>
+                    <div className="mt-3 border-t pt-3" style={{ borderColor: DB_BORDER }}>
+                      <p className="text-[9px] tracking-[0.24em] uppercase" style={{ color: "rgba(240,237,230,0.28)" }}>Involved people</p>
+                      <p className="mt-1 text-[11px]" style={{ color: "rgba(240,237,230,0.58)" }}>{b.required_staff_label || "No additional staff"}</p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {tooltip && (
         <div className="p-4 rounded text-[11px] space-y-1.5" style={{ background: DB_SURFACE, border: `1px solid ${tooltip.status?.color ?? DB_GOLD}30` }}>
           <div className="flex items-center gap-2">
@@ -3585,6 +3935,7 @@ function DashAgenda({ bookings, loading, profiles, isAdmin, myProfile }: { booki
             <span style={{ color: tooltip.status?.color ?? DB_GOLD }}>{tooltip.start_time?.slice(0,5)} → {tooltip.end_time?.slice(0,5)}</span>
           </div>
           <p style={{ color: "rgba(240,237,230,0.55)" }}>{tooltip.artist?.display_name} · {tooltip.studio?.name}</p>
+          <p style={{ color: "rgba(240,237,230,0.42)" }}>Staff: {tooltip.required_staff_label || "No additional staff"}</p>
           <p style={{ color: "rgba(240,237,230,0.35)" }}>{new Date(tooltip.date + "T12:00").toLocaleDateString("nl-NL", { weekday: "long", day: "numeric", month: "long" })}</p>
         </div>
       )}
@@ -3969,10 +4320,13 @@ function DashWallet({ profiles, loading, wallets, isAdmin, myProfile }: {
   return (
     <div className="space-y-6 max-w-4xl">
       <div>
-        <p className="text-[10px] tracking-[0.4em] uppercase mb-1" style={{ color: DB_GOLD }}>Studiotijd</p>
+        <p className="text-[10px] tracking-[0.4em] uppercase mb-1" style={{ color: DB_GOLD }}>Studio hours</p>
         <h2 className="font-display font-normal text-2xl" style={{ color: "rgba(240,237,230,0.9)" }}>
-          Uurbudget — {month}
+          Monthly studio hours — {month}
         </h2>
+        <p className="mt-2 max-w-xl text-[12px]" style={{ color: "rgba(240,237,230,0.42)" }}>
+          Shows how many studio hours are allocated to the artist this month, how many are already used, and how many are still available for booking.
+        </p>
       </div>
 
       {loading ? (
@@ -3987,7 +4341,7 @@ function DashWallet({ profiles, loading, wallets, isAdmin, myProfile }: {
             const pct = w.hours_total > 0 ? ((w.hours_total - w.hours_used) / w.hours_total) * 100 : 0;
             const barColor = pct > 50 ? DB_GOLD : pct > 25 ? "#F59E0B" : "#EF4444";
             return (
-              <div key={`${profile.id}-${w.program.name}`} className="p-5 rounded" style={{ background: DB_SURFACE, border: `1px solid ${DB_BORDER}` }}>
+              <div key={`${profile.id}-${w.program.name}`} className="p-5 rounded-xl" style={{ background: DB_SURFACE, border: `1px solid ${DB_BORDER}` }}>
                 <div className="flex items-center gap-3 mb-5">
                   <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 font-display text-sm"
                     style={{ background: "rgba(201,168,76,0.12)", color: DB_GOLD }}>
@@ -3999,17 +4353,32 @@ function DashWallet({ profiles, loading, wallets, isAdmin, myProfile }: {
                   </div>
                 </div>
 
-                <div className="flex items-end justify-between mb-2">
-                  <span className="font-display text-3xl" style={{ color: barColor }}>{w.hours_remaining}</span>
-                  <span className="text-[10px] pb-1" style={{ color: "rgba(240,237,230,0.3)" }}>/ {w.hours_total}u</span>
+                <div className="mb-4 grid grid-cols-3 gap-2">
+                  <div className="rounded-lg p-3" style={{ background: "rgba(240,237,230,0.035)", border: "1px solid rgba(240,237,230,0.06)" }}>
+                    <p className="text-[9px] uppercase tracking-[0.2em]" style={{ color: "rgba(240,237,230,0.34)" }}>Allocated</p>
+                    <p className="mt-1 font-display text-2xl" style={{ color: "rgba(240,237,230,0.82)" }}>{w.hours_total}</p>
+                  </div>
+                  <div className="rounded-lg p-3" style={{ background: "rgba(240,237,230,0.035)", border: "1px solid rgba(240,237,230,0.06)" }}>
+                    <p className="text-[9px] uppercase tracking-[0.2em]" style={{ color: "rgba(240,237,230,0.34)" }}>Used</p>
+                    <p className="mt-1 font-display text-2xl" style={{ color: "rgba(240,237,230,0.82)" }}>{w.hours_used}</p>
+                  </div>
+                  <div className="rounded-lg p-3" style={{ background: `${barColor}10`, border: `1px solid ${barColor}26` }}>
+                    <p className="text-[9px] uppercase tracking-[0.2em]" style={{ color: "rgba(240,237,230,0.34)" }}>Left</p>
+                    <p className="mt-1 font-display text-2xl" style={{ color: barColor }}>{w.hours_remaining}</p>
+                  </div>
                 </div>
 
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-[10px]" style={{ color: "rgba(240,237,230,0.38)" }}>Monthly usage</span>
+                  <span className="text-[10px]" style={{ color: barColor }}>{Math.round(pct)}% left</span>
+                </div>
                 <div className="h-1.5 rounded-full overflow-hidden mb-2" style={{ background: "rgba(240,237,230,0.06)" }}>
                   <div className="h-full rounded-full" style={{ width: `${pct}%`, background: `linear-gradient(90deg, ${barColor}, ${barColor}99)` }} />
                 </div>
 
                 <div className="flex items-center justify-between mt-1">
-                  <span className="text-[9px]" style={{ color: "rgba(240,237,230,0.25)" }}>{w.hours_used}u gebruikt</span>
+                  <span className="text-[9px]" style={{ color: "rgba(240,237,230,0.25)" }}>Used: {w.hours_used} hours</span>
+                  <span className="text-[9px]" style={{ color: "rgba(240,237,230,0.25)" }}>Available: {w.hours_remaining} hours</span>
                   {w.split_used && (
                     <span className="text-[9px] tracking-[0.18em] uppercase px-2 py-0.5 rounded-full"
                       style={{ background: "rgba(201,168,76,0.08)", color: "rgba(201,168,76,0.5)" }}>
@@ -4298,13 +4667,13 @@ function ProfileCard({ profile, expanded = false }: { profile: Profile; expanded
   );
 }
 
-function BookingTable({ bookings }: { bookings: Booking[] }) {
+function BookingTable({ bookings, onCancel }: { bookings: Booking[]; onCancel?: (booking: Booking) => void }) {
   return (
     <div className="overflow-x-auto rounded" style={{ border: `1px solid ${DB_BORDER}` }}>
       <table className="w-full text-[11px]" style={{ borderCollapse: "collapse" }}>
         <thead>
           <tr style={{ borderBottom: `1px solid ${DB_BORDER}`, background: "rgba(201,168,76,0.04)" }}>
-            {["Datum", "Artiest", "Studio", "Type", "Duur", "Status"].map(h => (
+            {["Datum", "Tijd", "Artiest", "Studio", "Type", "Betrokken personen", "Status", ...(onCancel ? ["Actie"] : [])].map(h => (
               <th key={h} className="text-left px-4 py-3 text-[9px] tracking-[0.3em] uppercase font-normal"
                 style={{ color: "rgba(240,237,230,0.35)" }}>{h}</th>
             ))}
@@ -4314,20 +4683,1573 @@ function BookingTable({ bookings }: { bookings: Booking[] }) {
           {bookings.map((b, i) => (
             <tr key={b.id} style={{ borderBottom: i < bookings.length - 1 ? `1px solid rgba(201,168,76,0.06)` : "none" }}>
               <td className="px-4 py-3" style={{ color: "rgba(240,237,230,0.6)" }}>{b.date}</td>
+              <td className="px-4 py-3 whitespace-nowrap" style={{ color: DB_GOLD }}>{b.start_time?.slice(0,5)} – {b.end_time?.slice(0,5)}</td>
               <td className="px-4 py-3" style={{ color: "rgba(240,237,230,0.7)" }}>{b.artist?.display_name ?? "—"}</td>
               <td className="px-4 py-3" style={{ color: "rgba(240,237,230,0.5)" }}>{b.studio?.name ?? "—"}</td>
               <td className="px-4 py-3" style={{ color: "rgba(240,237,230,0.5)" }}>{b.booking_type?.name ?? "—"}</td>
-              <td className="px-4 py-3" style={{ color: "rgba(240,237,230,0.5)" }}>{b.duration_hours}u</td>
+              <td className="px-4 py-3" style={{ color: "rgba(240,237,230,0.5)" }}>{b.required_staff_label || "—"}</td>
               <td className="px-4 py-3">
                 {b.status ? (
                   <span className="px-2 py-0.5 rounded text-[9px] tracking-[0.2em] uppercase"
                     style={{ background: `${b.status.color}18`, color: b.status.color }}>{b.status.name}</span>
                 ) : "—"}
               </td>
+              {onCancel && (
+                <td className="px-4 py-3">
+                  {b.status?.slug !== "cancelled" && b.status?.slug !== "completed" && (
+                    <button type="button" onClick={() => onCancel(b)} className="rounded-lg border px-3 py-1.5 text-[9px] uppercase tracking-[0.16em]" style={{ borderColor: "rgba(239,68,68,0.3)", color: "#F87171", background: "rgba(239,68,68,0.08)" }}>
+                      Cancel booking
+                    </button>
+                  )}
+                </td>
+              )}
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// ─── ADMIN CONSOLE ───────────────────────────────────────────────────────────
+
+type AdminModuleKey =
+  | "dashboard"
+  | "studios"
+  | "services"
+  | "artist-types"
+  | "roles"
+  | "artist-profiles"
+  | "opening-hours"
+  | "staff-availability"
+  | "studio-hour-ledger"
+  | "financial-agreements"
+  | "goldlective-extra-hours"
+  | "studio-bookings"
+  | "agenda"
+  | "notifications"
+  | "contact-messages"
+  | "audit-history"
+  | "settings"
+  | "users";
+
+type AdminNavItem = {
+  key: AdminModuleKey;
+  label: string;
+  icon: typeof Activity;
+};
+
+type AdminRow = Record<string, any>;
+
+const ADMIN_NAV: AdminNavItem[] = [
+  { key: "dashboard", label: "Dashboard", icon: Activity },
+  { key: "studios", label: "Studios", icon: Layers },
+  { key: "services", label: "Services", icon: BriefcaseBusiness },
+  { key: "artist-types", label: "Artist Types", icon: TagsIcon },
+  { key: "roles", label: "Roles", icon: UserRoundCogIcon },
+  { key: "artist-profiles", label: "Artist Profiles", icon: Users },
+  { key: "opening-hours", label: "Opening Hours", icon: Clock },
+  { key: "staff-availability", label: "Staff Availability", icon: CalendarDays },
+  { key: "studio-hour-ledger", label: "Studio-hour Ledger", icon: WalletCards },
+  { key: "financial-agreements", label: "Financial Agreements", icon: FileSignature },
+  { key: "goldlective-extra-hours", label: "Goldlective Extra Hours", icon: Plus },
+  { key: "studio-bookings", label: "Studio Bookings", icon: CalendarDays },
+  { key: "agenda", label: "Agenda", icon: ListChecks },
+  { key: "notifications", label: "Notifications", icon: Bell },
+  { key: "contact-messages", label: "Contact Messages", icon: Mail },
+  { key: "audit-history", label: "Audit History", icon: ListChecks },
+  { key: "settings", label: "Settings", icon: Settings },
+  { key: "users", label: "Users", icon: Users },
+];
+
+const ADMIN_ENDPOINTS: Partial<Record<AdminModuleKey, string>> = {
+  studios: "/studios",
+  services: "/services",
+  "artist-types": "/artist-types",
+  roles: "/roles",
+  "artist-profiles": "/profiles",
+  "opening-hours": "/opening-hours",
+  "staff-availability": "/availability",
+  "studio-hour-ledger": "/studio-hour-ledger",
+  "financial-agreements": "/financial-agreements",
+  "goldlective-extra-hours": "/additional-hours",
+  "studio-bookings": "/bookings",
+  agenda: "/bookings",
+  notifications: "/notifications",
+  "contact-messages": "/contact",
+  "audit-history": "/audit-logs",
+  settings: "/settings",
+  users: "/users",
+};
+
+const ADMIN_META: Record<AdminModuleKey, { title: string; description: string; cta?: string }> = {
+  dashboard: {
+    title: "Administrator Dashboard",
+    description: "Complete Dejavu OS control room for bookings, artists, studios, hours and communication.",
+  },
+  studios: { title: "Studios", description: "Manage studio rooms, bookable status and operating setup.", cta: "Add studio" },
+  services: { title: "Services", description: "Manage booking services and required staff rules.", cta: "Add service" },
+  "artist-types": { title: "Artist Types", description: "Configure Goldlective, House Artist and custom artist categories.", cta: "Add artist type" },
+  roles: { title: "Roles", description: "Create roles and permissions used by admin, artists, engineers and beat makers.", cta: "Add role" },
+  "artist-profiles": { title: "Artist Profiles", description: "Review users, assigned roles, programs and account status.", cta: "Add artist" },
+  "opening-hours": { title: "Opening Hours", description: "Maintain regular opening hours plus holiday, event and maintenance exceptions.", cta: "Add exception" },
+  "staff-availability": { title: "Staff Availability", description: "Manage engineer and beat maker availability by day and time.", cta: "Add availability" },
+  "studio-hour-ledger": { title: "Studio-hour Ledger", description: "Track allocated, used, remaining and extra approved studio hours." },
+  "financial-agreements": { title: "Financial Agreements", description: "Manage hourly/monthly agreements with version history and rate snapshots.", cta: "Add agreement" },
+  "goldlective-extra-hours": { title: "Goldlective Extra Hours", description: "Approve additional hours linked to a specific booking.", cta: "Approve hours" },
+  "studio-bookings": { title: "Studio Bookings", description: "Create, confirm, cancel, complete, no-show and edit studio sessions.", cta: "Add booking" },
+  agenda: { title: "Agenda", description: "Calendar-style view for all studio sessions and staff schedules." },
+  notifications: { title: "Notifications", description: "Review in-app alerts for booking and contact activity." },
+  "contact-messages": { title: "Contact Messages", description: "Read public website contact form submissions and follow-up status." },
+  "audit-history": { title: "Audit History", description: "Review important booking, permission, hours, studio and agreement changes." },
+  settings: { title: "Settings", description: "SMTP, notification recipients and operational system preferences." },
+  users: { title: "Users", description: "Create users and assign dynamic roles from the admin role list.", cta: "Add user" },
+};
+
+function TagsIcon(props: any) {
+  return <SlidersHorizontal {...props} />;
+}
+
+function UserRoundCogIcon(props: any) {
+  return <Users {...props} />;
+}
+
+function normalizeRows(payload: any): AdminRow[] {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.items)) return payload.items;
+  if (Array.isArray(payload?.rows)) return payload.rows;
+  if (payload && typeof payload === "object") return [payload];
+  return [];
+}
+
+function adminValue(row: AdminRow, keys: string[], fallback = "—") {
+  for (const key of keys) {
+    const value = key.split(".").reduce<any>((acc, part) => acc?.[part], row);
+    if (value !== undefined && value !== null && value !== "") return String(value);
+  }
+  return fallback;
+}
+
+function prettyDateTime(value?: string) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("nl-NL", { dateStyle: "medium", timeStyle: "short" });
+}
+
+function AdminConsolePage() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const { session, signOut, authLoading } = useAuth();
+  const devMode = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("dev");
+  const adminSession = devMode || isAdminSession(session);
+  const token = devMode ? SUPABASE_ANON : session?.access_token;
+  const key = (location.pathname.split("/")[2] || "dashboard") as AdminModuleKey;
+  const activeKey: AdminModuleKey = ADMIN_META[key] ? key : "dashboard";
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  useEffect(() => {
+    if (!devMode && !authLoading && !session) navigate("/admin-login", { replace: true });
+    else if (!devMode && !authLoading && session && !adminSession) navigate("/dashboard", { replace: true });
+  }, [authLoading, session, devMode, adminSession, navigate]);
+
+  if (!devMode && (authLoading || !session || !adminSession)) {
+    return <AdminLoadingScreen label="Loading admin…" />;
+  }
+
+  return (
+    <div className="min-h-screen" style={{ background: "#070707", color: WHITE, fontFamily: "'Outfit', sans-serif" }}>
+      <GlobalStyles />
+      {mobileOpen && <button className="fixed inset-0 z-30 bg-black/60 lg:hidden" onClick={() => setMobileOpen(false)} aria-label="Close admin menu" />}
+      <aside
+        className={`fixed inset-y-0 left-0 z-40 w-[282px] border-r transition-transform duration-200 lg:translate-x-0 ${mobileOpen ? "translate-x-0" : "-translate-x-full"}`}
+        style={{ background: "#0C0C0C", borderColor: DB_BORDER }}
+      >
+        <div className="flex h-20 items-center gap-3 px-5" style={{ borderBottom: `1px solid ${DB_BORDER}` }}>
+          <img src={dvLogo} className="h-10 w-10 rounded-full object-cover" alt="Déjà Vu" />
+          <div>
+            <p className="font-display text-lg">DejavuStudio</p>
+            <p className="text-[10px] tracking-[0.35em] uppercase" style={{ color: G }}>Admin OS</p>
+          </div>
+          <button className="ml-auto rounded-lg p-2 lg:hidden" onClick={() => setMobileOpen(false)} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+        <nav className="h-[calc(100vh-80px)] space-y-1 overflow-y-auto p-3">
+          {ADMIN_NAV.map(({ key: itemKey, label, icon: Icon }) => {
+            const active = activeKey === itemKey;
+            return (
+              <button
+                key={itemKey}
+                onClick={() => { navigate(`/admin/${itemKey}${devMode ? "?dev" : ""}`); setMobileOpen(false); }}
+                className="group flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm transition-all"
+                style={{
+                  background: active ? "linear-gradient(135deg, rgba(201,168,76,0.20), rgba(201,168,76,0.06))" : "transparent",
+                  border: `1px solid ${active ? "rgba(201,168,76,0.28)" : "transparent"}`,
+                  color: active ? WHITE : "rgba(240,237,230,0.58)",
+                }}
+              >
+                <Icon size={17} style={{ color: active ? G : "rgba(240,237,230,0.42)" }} />
+                <span className="font-medium">{label}</span>
+              </button>
+            );
+          })}
+        </nav>
+      </aside>
+      <main className="min-h-screen lg:pl-[282px]">
+        <header className="sticky top-0 z-20 flex h-20 items-center justify-between border-b px-5 backdrop-blur-xl lg:px-8"
+          style={{ background: "rgba(7,7,7,0.82)", borderColor: DB_BORDER }}>
+          <div className="flex items-center gap-3">
+            <button className="rounded-xl border p-2 lg:hidden" style={{ borderColor: DB_BORDER }} onClick={() => setMobileOpen(true)}>
+              <SlidersHorizontal size={18} />
+            </button>
+            <div>
+              <p className="text-[10px] tracking-[0.35em] uppercase" style={{ color: G }}>Déjà Vu Studio OS</p>
+              <h1 className="font-display text-2xl">{ADMIN_META[activeKey].title}</h1>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <button className="hidden rounded-xl border px-4 py-2 text-sm sm:inline-flex" style={{ borderColor: DB_BORDER, color: "rgba(240,237,230,0.72)" }}>
+              {devMode ? "Local preview" : session?.user?.email}
+            </button>
+            {!devMode && (
+              <button onClick={() => { signOut(); navigate("/", { replace: true }); }} className="rounded-xl border px-4 py-2 text-sm" style={{ borderColor: DB_BORDER }}>
+                Sign out
+              </button>
+            )}
+          </div>
+        </header>
+        <section className="p-5 lg:p-8">
+          {activeKey === "dashboard" ? (
+            <AdminDashboard token={token} devMode={devMode} />
+          ) : activeKey === "studio-bookings" ? (
+            <AdminBookingsModule token={token} />
+          ) : activeKey === "settings" ? (
+            <AdminSettingsModule token={token} />
+          ) : (
+            <AdminGenericModule moduleKey={activeKey} token={token} />
+          )}
+        </section>
+      </main>
+    </div>
+  );
+}
+
+function AdminLoadingScreen({ label }: { label: string }) {
+  return (
+    <div className="flex min-h-screen items-center justify-center" style={{ background: "#070707", color: WHITE }}>
+      <div className="text-center">
+        <div className="mx-auto mb-4 h-10 w-10 animate-pulse rounded-full" style={{ background: "rgba(201,168,76,0.18)" }} />
+        <p className="text-[10px] tracking-[0.35em] uppercase" style={{ color: G }}>{label}</p>
+      </div>
+    </div>
+  );
+}
+
+function useAdminRows(moduleKey: AdminModuleKey, token?: string) {
+  const [rows, setRows] = useState<AdminRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const endpoint = ADMIN_ENDPOINTS[moduleKey];
+
+  const load = async () => {
+    if (!endpoint || !token) return;
+    setLoading(true);
+    setError("");
+    try {
+      const res = await apiFetch(endpoint, {}, token);
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error || body?.message || `HTTP ${res.status}`);
+      setRows(normalizeRows(body));
+    } catch (err: any) {
+      setError(err?.message || "Unable to load records");
+      setRows([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, [endpoint, token]);
+  return { rows, loading, error, reload: load };
+}
+
+function AdminDashboard({ token, devMode }: { token?: string; devMode: boolean }) {
+  const navigate = useNavigate();
+  const [summary, setSummary] = useState<any>(null);
+  const [recentBookings, setRecentBookings] = useState<any[]>([]);
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [auditLogs, setAuditLogs] = useState<any[]>([]);
+  const [contacts, setContacts] = useState<any[]>([]);
+  const [ledger, setLedger] = useState<any[]>([]);
+  const [studios, setStudios] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!token) return;
+    setLoading(true);
+    Promise.all([
+      apiFetch("/dashboard/overview", {}, token).then((r) => r.json()).catch(() => null),
+      apiFetch("/bookings", {}, token).then((r) => r.json()).catch(() => []),
+      apiFetch("/notifications", {}, token).then((r) => r.json()).catch(() => []),
+      apiFetch("/audit-logs", {}, token).then((r) => r.json()).catch(() => []),
+      apiFetch("/contact", {}, token).then((r) => r.json()).catch(() => []),
+      apiFetch("/studio-hour-ledger", {}, token).then((r) => r.json()).catch(() => []),
+      apiFetch("/studios", {}, token).then((r) => r.json()).catch(() => []),
+    ]).then(([overview, bookingRows, notificationRows, auditRows, contactRows, ledgerRows, studioRows]) => {
+      setSummary(overview);
+      setRecentBookings(Array.isArray(bookingRows) ? bookingRows : []);
+      setNotifications(Array.isArray(notificationRows) ? notificationRows : []);
+      setAuditLogs(Array.isArray(auditRows) ? auditRows.slice(0, 5) : []);
+      setContacts(Array.isArray(contactRows) ? contactRows.slice(0, 3) : []);
+      setLedger(Array.isArray(ledgerRows) ? ledgerRows : []);
+      setStudios(Array.isArray(studioRows) ? studioRows : []);
+    }).catch(() => {
+      setSummary(null);
+      setRecentBookings([]);
+      setNotifications([]);
+      setAuditLogs([]);
+      setContacts([]);
+      setLedger([]);
+      setStudios([]);
+    }).finally(() => setLoading(false));
+  }, [token]);
+
+  const goAdmin = (key: AdminModuleKey) => navigate(`/admin/${key}${devMode ? "?dev" : ""}`);
+  const today = new Date().toISOString().split("T")[0];
+  const todayBookings = recentBookings.filter((booking) => booking.date === today && booking.status?.slug !== "cancelled");
+  const pendingBookings = recentBookings.filter((booking) => booking.status?.slug === "pending");
+  const unreadNotifications = notifications.filter((n) => !n.read_at).length;
+  const bookableStudios = studios.filter((studio) => studio.is_active && studio.is_bookable).length;
+  const lowHourAccounts = ledger.filter((row) => Number(row.allocated_hours || 0) > 0 && Number(row.remaining_hours || 0) / Number(row.allocated_hours || 1) <= 0.25).length;
+  const stats = [
+    { label: "Today's sessions", value: todayBookings.length, hint: "active bookings today", icon: CalendarDays, target: "agenda" as AdminModuleKey },
+    { label: "Awaiting action", value: pendingBookings.length, hint: "pending confirmations", icon: Clock, target: "studio-bookings" as AdminModuleKey },
+    { label: "Bookable studios", value: bookableStudios, hint: `${studios.length} studios configured`, icon: Layers, target: "studios" as AdminModuleKey },
+    { label: "Unread alerts", value: unreadNotifications, hint: "notifications to review", icon: Bell, target: "notifications" as AdminModuleKey },
+  ];
+  const launchCards = [
+    {
+      title: "Studio bookings",
+      target: "studio-bookings" as AdminModuleKey,
+      icon: CalendarDays,
+      badge: "P1 Launch",
+      description: "Create sessions, assign staff, confirm, cancel, complete and no-show from one professional table.",
+      cta: "Manage bookings",
+    },
+    {
+      title: "Goldlective hours",
+      target: "studio-hour-ledger" as AdminModuleKey,
+      icon: WalletCards,
+      badge: "P1 Launch",
+      description: "Track allocated, used, remaining and extra approved Goldlective studio hours.",
+      cta: "Open ledger",
+    },
+    {
+      title: "Financial agreements",
+      target: "financial-agreements" as AdminModuleKey,
+      icon: FileSignature,
+      badge: "P1 Launch",
+      description: "Maintain artist rates and agreement snapshots so old bookings keep their original terms.",
+      cta: "Manage agreements",
+    },
+  ];
+  const quickActions = [
+    { label: "Create booking", hint: "Plan a new studio session", icon: Plus, target: "studio-bookings" as AdminModuleKey },
+    { label: "Review pending", hint: `${pendingBookings.length} awaiting confirmation`, icon: Check, target: "studio-bookings" as AdminModuleKey },
+    { label: "Manage studio hours", hint: `${lowHourAccounts} low-balance account${lowHourAccounts === 1 ? "" : "s"}`, icon: WalletCards, target: "studio-hour-ledger" as AdminModuleKey },
+    { label: "Opening hours", hint: "Regular hours and exceptions", icon: Clock, target: "opening-hours" as AdminModuleKey },
+  ];
+  const activeLedger = ledger[0];
+
+  return (
+    <div className="space-y-6">
+      <section className="overflow-hidden rounded-3xl border p-6 lg:p-8" style={{ background: "radial-gradient(circle at 88% 16%, rgba(201,168,76,0.16), transparent 28%), linear-gradient(145deg, #14130F, #0B0B0B 68%)", borderColor: "rgba(201,168,76,0.22)" }}>
+        <div className="flex flex-wrap items-end justify-between gap-5">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.4em]" style={{ color: G }}>Control room · Live overview</p>
+            <h2 className="mt-2 font-display text-3xl lg:text-4xl" style={{ color: "rgba(240,237,230,0.96)" }}>Good day, Administrator</h2>
+            <p className="mt-2 max-w-2xl text-sm" style={{ color: "rgba(240,237,230,0.5)" }}>See what needs attention, what is happening today and move directly to the right admin workflow.</p>
+          </div>
+          <div className="rounded-2xl border px-5 py-3 text-right" style={{ background: "rgba(0,0,0,0.28)", borderColor: DB_BORDER }}>
+            <p className="text-[9px] uppercase tracking-[0.28em]" style={{ color: "rgba(240,237,230,0.36)" }}>Today</p>
+            <p className="mt-1 text-sm font-semibold" style={{ color: G_LIGHT }}>{new Date().toLocaleDateString("nl-NL", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}</p>
+          </div>
+        </div>
+      </section>
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {stats.map((s) => (
+          <button
+            key={s.label}
+            type="button"
+            onClick={() => goAdmin(s.target)}
+            className="group rounded-2xl border p-5 text-left transition-all hover:-translate-y-1 hover:shadow-2xl focus:outline-none focus:ring-2"
+            style={{ background: "linear-gradient(145deg, rgba(18,18,18,0.98), rgba(9,9,9,0.98))", borderColor: DB_BORDER, boxShadow: "0 0 0 rgba(201,168,76,0)" }}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <p className="text-[10px] tracking-[0.35em] uppercase" style={{ color: "rgba(240,237,230,0.45)" }}>{s.label}</p>
+              <span className="rounded-xl p-2 transition-colors group-hover:bg-[rgba(201,168,76,0.12)]" style={{ color: G, border: "1px solid rgba(201,168,76,0.14)" }}>
+                <s.icon size={16} />
+              </span>
+            </div>
+            <p className="mt-3 font-display text-4xl" style={{ color: G }}>{loading ? "…" : s.value}</p>
+            <div className="mt-1 flex items-center justify-between gap-2">
+              <p className="text-sm" style={{ color: "rgba(240,237,230,0.45)" }}>{s.hint}</p>
+              <span className="text-[10px] font-semibold opacity-0 transition-opacity group-hover:opacity-100" style={{ color: G }}>Open →</span>
+            </div>
+          </button>
+        ))}
+      </div>
+      <section className="rounded-2xl border p-5" style={{ background: "#0E0E0E", borderColor: DB_BORDER }}>
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.34em]" style={{ color: G }}>Quick actions</p>
+            <p className="mt-1 text-sm" style={{ color: "rgba(240,237,230,0.42)" }}>Most-used operational workflows.</p>
+          </div>
+          <p className="text-xs" style={{ color: "rgba(240,237,230,0.32)" }}>{summary?.totalProfiles ?? 0} users · {summary?.totalBookings ?? 0} total bookings</p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {quickActions.map((action) => (
+            <button key={action.label} type="button" onClick={() => goAdmin(action.target)} className="group flex items-center gap-3 rounded-xl border p-4 text-left transition-all hover:-translate-y-0.5" style={{ background: "#090909", borderColor: DB_BORDER }}>
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl" style={{ background: "rgba(201,168,76,0.09)", color: G }}><action.icon size={17} /></span>
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold" style={{ color: "rgba(240,237,230,0.84)" }}>{action.label}</span>
+                <span className="mt-0.5 block truncate text-[11px]" style={{ color: "rgba(240,237,230,0.38)" }}>{action.hint}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+      </section>
+      <div className="grid gap-4 xl:grid-cols-[1.45fr_0.9fr]">
+        <section className="rounded-2xl border p-5" style={{ background: "#101010", borderColor: DB_BORDER }}>
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div>
+              <p className="text-[10px] tracking-[0.35em] uppercase" style={{ color: G }}>Live bookings</p>
+              <h3 className="mt-1 font-display text-2xl">Recent studio sessions</h3>
+            </div>
+            <button onClick={() => goAdmin("studio-bookings")} className="rounded-xl border px-3 py-2 text-sm font-semibold" style={{ borderColor: DB_BORDER, color: G }}>
+              View all
+            </button>
+          </div>
+          {loading ? (
+            <p className="text-sm" style={{ color: "rgba(240,237,230,0.45)" }}>Loading real booking data…</p>
+          ) : !recentBookings.length ? (
+            <div className="rounded-xl border border-dashed p-6 text-center text-sm" style={{ borderColor: "rgba(201,168,76,0.18)", color: "rgba(240,237,230,0.45)" }}>
+              No bookings found yet. Create a booking to see live data here.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {recentBookings.slice(0, 5).map((booking) => {
+                const statusColor = booking.status?.color || G;
+                return (
+                  <button
+                    key={booking.id || booking.reference}
+                    type="button"
+                    onClick={() => goAdmin("studio-bookings")}
+                    className="flex w-full items-center gap-4 rounded-xl border p-4 text-left transition-all hover:-translate-y-0.5"
+                    style={{ background: "#0A0A0A", borderColor: DB_BORDER }}
+                  >
+                    <div className="flex h-12 w-12 shrink-0 flex-col items-center justify-center rounded-xl" style={{ background: "rgba(201,168,76,0.08)", color: G }}>
+                      <span className="text-[10px] uppercase">{new Date(`${booking.date}T12:00`).toLocaleDateString("nl-NL", { month: "short" })}</span>
+                      <span className="font-display text-lg leading-none">{new Date(`${booking.date}T12:00`).getDate()}</span>
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold" style={{ color: "rgba(240,237,230,0.9)" }}>
+                        {booking.artist?.display_name || booking.artist_name || "Artist"} · {booking.booking_type?.name || booking.service?.name || "Studio session"}
+                      </p>
+                      <p className="mt-1 truncate text-xs" style={{ color: "rgba(240,237,230,0.45)" }}>
+                        {booking.studio?.name || "Studio"} · {booking.start_time?.slice(0, 5)}–{booking.end_time?.slice(0, 5)} · {booking.reference || booking.id}
+                      </p>
+                    </div>
+                    <span className="rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.15em]" style={{ background: `${statusColor}18`, color: statusColor, border: `1px solid ${statusColor}30` }}>
+                      {booking.status?.name || booking.status || "Pending"}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        <aside className="space-y-4">
+          <button onClick={() => goAdmin("notifications")} className="w-full rounded-2xl border p-5 text-left transition-all hover:-translate-y-0.5" style={{ background: "#101010", borderColor: DB_BORDER }}>
+            <p className="text-[10px] tracking-[0.35em] uppercase" style={{ color: G }}>Notifications</p>
+            <p className="mt-3 font-display text-3xl" style={{ color: unreadNotifications ? G : "rgba(240,237,230,0.82)" }}>{unreadNotifications}</p>
+            <p className="text-sm" style={{ color: "rgba(240,237,230,0.45)" }}>unread alerts</p>
+          </button>
+          <button onClick={() => goAdmin("studio-hour-ledger")} className="w-full rounded-2xl border p-5 text-left transition-all hover:-translate-y-0.5" style={{ background: "#101010", borderColor: DB_BORDER }}>
+            <p className="text-[10px] tracking-[0.35em] uppercase" style={{ color: G }}>Studio hours</p>
+            <p className="mt-3 font-display text-3xl" style={{ color: G }}>{activeLedger?.remaining_hours ?? "—"}</p>
+            <p className="text-sm" style={{ color: "rgba(240,237,230,0.45)" }}>
+              remaining from {activeLedger?.allocated_hours ?? "—"} allocated
+            </p>
+          </button>
+        </aside>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <section className="rounded-2xl border p-5" style={{ background: "#101010", borderColor: DB_BORDER }}>
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <p className="text-[10px] tracking-[0.35em] uppercase" style={{ color: G }}>Activity</p>
+              <h3 className="mt-1 font-display text-xl">Audit trail</h3>
+            </div>
+            <button onClick={() => goAdmin("audit-history")} className="text-sm font-semibold" style={{ color: G }}>Open →</button>
+          </div>
+          <div className="space-y-3">
+            {auditLogs.length ? auditLogs.map((row) => (
+              <div key={row.id} className="rounded-xl border p-3" style={{ background: "#0A0A0A", borderColor: DB_BORDER }}>
+                <p className="text-sm" style={{ color: "rgba(240,237,230,0.86)" }}>{row.action || "system.action"}</p>
+                <p className="mt-1 text-xs" style={{ color: "rgba(240,237,230,0.42)" }}>{row.actor_name || row.actor || "System"} · {prettyDateTime(row.created_at)}</p>
+              </div>
+            )) : (
+              <p className="text-sm" style={{ color: "rgba(240,237,230,0.42)" }}>No audit activity yet.</p>
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-2xl border p-5" style={{ background: "#101010", borderColor: DB_BORDER }}>
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <p className="text-[10px] tracking-[0.35em] uppercase" style={{ color: G }}>Messages</p>
+              <h3 className="mt-1 font-display text-xl">Recent contact requests</h3>
+            </div>
+            <button onClick={() => goAdmin("contact-messages")} className="text-sm font-semibold" style={{ color: G }}>Open →</button>
+          </div>
+          <div className="space-y-3">
+            {contacts.length ? contacts.map((row) => (
+              <div key={row.id} className="rounded-xl border p-3" style={{ background: "#0A0A0A", borderColor: DB_BORDER }}>
+                <p className="text-sm font-semibold" style={{ color: "rgba(240,237,230,0.86)" }}>{row.name || row.naam || "Website visitor"}</p>
+                <p className="mt-1 truncate text-xs" style={{ color: "rgba(240,237,230,0.42)" }}>{row.email} · {row.message || row.bericht}</p>
+              </div>
+            )) : (
+              <p className="text-sm" style={{ color: "rgba(240,237,230,0.42)" }}>No contact requests yet.</p>
+            )}
+          </div>
+        </section>
+      </div>
+      <div className="grid gap-4 xl:grid-cols-3">
+        {launchCards.map((card) => (
+          <button
+            key={card.title}
+            type="button"
+            onClick={() => goAdmin(card.target)}
+            className="group relative overflow-hidden rounded-2xl border p-5 text-left transition-all hover:-translate-y-1 focus:outline-none focus:ring-2"
+            style={{ background: "radial-gradient(circle at top right, rgba(201,168,76,0.14), transparent 36%), linear-gradient(145deg, #111, #090909)", borderColor: DB_BORDER }}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <p className="text-[10px] tracking-[0.35em] uppercase" style={{ color: G }}>{card.badge}</p>
+              <span className="rounded-2xl p-3 transition-all group-hover:scale-105" style={{ background: "rgba(201,168,76,0.08)", color: G, border: "1px solid rgba(201,168,76,0.16)" }}>
+                <card.icon size={19} />
+              </span>
+            </div>
+            <h3 className="mt-3 font-display text-2xl" style={{ color: "rgba(240,237,230,0.94)" }}>{card.title}</h3>
+            <p className="mt-2 min-h-[64px] text-sm leading-relaxed" style={{ color: "rgba(240,237,230,0.52)" }}>{card.description}</p>
+            <div className="mt-5 inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold transition-colors"
+              style={{ background: "rgba(201,168,76,0.10)", color: G, border: "1px solid rgba(201,168,76,0.18)" }}>
+              {card.cta}
+              <ChevronRight size={15} className="transition-transform group-hover:translate-x-1" />
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AdminHero({ title, description, cta, onRefresh, onCta }: { title: string; description: string; cta?: string; onRefresh?: () => void; onCta?: () => void }) {
+  return (
+    <div className="flex flex-col gap-4 rounded-3xl border p-5 md:flex-row md:items-center md:justify-between"
+      style={{ background: "radial-gradient(circle at top right, rgba(201,168,76,0.12), transparent 34%), #101010", borderColor: DB_BORDER }}>
+      <div>
+        <p className="text-[10px] tracking-[0.42em] uppercase" style={{ color: G }}>Admin module</p>
+        <h2 className="mt-2 font-display text-3xl">{title}</h2>
+        <p className="mt-2 max-w-3xl text-sm leading-relaxed" style={{ color: "rgba(240,237,230,0.52)" }}>{description}</p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {onRefresh && <AdminIconButton label="Refresh" icon={RefreshCw} onClick={onRefresh} />}
+        {cta && <AdminIconButton label={cta} icon={Plus} primary onClick={onCta} />}
+      </div>
+    </div>
+  );
+}
+
+function AdminIconButton({ label, icon: Icon, onClick, primary, danger }: { label: string; icon: typeof Activity; onClick?: () => void; primary?: boolean; danger?: boolean }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-semibold transition-transform hover:-translate-y-0.5"
+      style={{
+        background: primary ? "linear-gradient(135deg, #F2D77A, #A87C22)" : danger ? "rgba(220,38,38,0.16)" : "rgba(255,255,255,0.02)",
+        borderColor: primary ? "rgba(242,215,122,0.42)" : danger ? "rgba(220,38,38,0.32)" : DB_BORDER,
+        color: primary ? "#050505" : danger ? "#F87171" : "rgba(240,237,230,0.86)",
+      }}
+    >
+      <Icon size={16} />
+      {label}
+    </button>
+  );
+}
+
+type AdminFormField = { name: string; label: string; type: string; required?: boolean; options?: { value: string; label: string }[] };
+type AdminReferenceData = { profiles: AdminRow[]; studios: AdminRow[]; services: AdminRow[]; artistTypes: AdminRow[] };
+
+function useAdminReferenceData(token?: string): AdminReferenceData {
+  const [references, setReferences] = useState<AdminReferenceData>({ profiles: [], studios: [], services: [], artistTypes: [] });
+  useEffect(() => {
+    if (!token) return;
+    Promise.all([
+      apiFetch("/profiles", {}, token).then(response => response.json()),
+      apiFetch("/studios", {}, token).then(response => response.json()),
+      apiFetch("/services", {}, token).then(response => response.json()),
+      apiFetch("/artist-types", {}, token).then(response => response.json()),
+    ]).then(([profiles, studios, services, artistTypes]) => setReferences({
+      profiles: Array.isArray(profiles) ? profiles : [],
+      studios: Array.isArray(studios) ? studios : [],
+      services: Array.isArray(services) ? services : [],
+      artistTypes: Array.isArray(artistTypes) ? artistTypes : [],
+    })).catch(() => setReferences({ profiles: [], studios: [], services: [], artistTypes: [] }));
+  }, [token]);
+  return references;
+}
+
+function resolvedAdminFields(moduleKey: AdminModuleKey, references: AdminReferenceData): AdminFormField[] {
+  const fields = adminFormFields(moduleKey);
+  return fields.map(field => {
+    if (["studio_id", "default_studio_id"].includes(field.name)) return { ...field, type: "select", options: references.studios.map(studio => ({ value: String(studio.id), label: String(studio.name) })) };
+    if (field.name === "service_id") return { ...field, options: references.services.filter(service => service.is_active !== false && service.is_bookable !== false).map(service => ({ value: String(service.id), label: `${service.name} · ${service.duration_minutes || 0} min` })) };
+    if (field.name === "artist_id") return { ...field, options: references.profiles.filter(profile => profile.user_roles?.some((entry: any) => entry.role?.slug === "artist")).map(profile => ({ value: String(profile.id), label: `${profile.display_name} · ${profile.email || "no email"}` })) };
+    if (field.name === "engineer_id") return { ...field, options: references.profiles.filter(profile => profile.user_roles?.some((entry: any) => entry.role?.slug === "engineer")).map(profile => ({ value: String(profile.id), label: String(profile.display_name) })) };
+    if (field.name === "beat_maker_id") return { ...field, options: references.profiles.filter(profile => profile.user_roles?.some((entry: any) => ["beatmaker", "beat-creator"].includes(entry.role?.slug))).map(profile => ({ value: String(profile.id), label: String(profile.display_name) })) };
+    if (field.name === "profile_id") return { ...field, type: "select", options: references.profiles.filter(profile => profile.user_roles?.some((entry: any) => ["engineer", "beatmaker", "film-director-cameraman"].includes(entry.role?.slug))).map(profile => ({ value: String(profile.id), label: `${profile.display_name} · ${profile.user_roles?.map((entry: any) => entry.role.name).join(", ")}` })) };
+    if (field.name === "artist_type_id") return { ...field, options: references.artistTypes.map(type => ({ value: String(type.id), label: String(type.name) })) };
+    return field;
+  });
+}
+
+function AdminGenericModule({ moduleKey, token }: { moduleKey: AdminModuleKey; token?: string }) {
+  const meta = ADMIN_META[moduleKey];
+  const { rows, loading, error, reload } = useAdminRows(moduleKey, token);
+  const [editing, setEditing] = useState<AdminRow | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [notice, setNotice] = useState("");
+  const references = useAdminReferenceData(token);
+
+  const saveRecord = async (values: AdminRow) => {
+    const endpoint = ADMIN_ENDPOINTS[moduleKey];
+    if (!endpoint || !token) return;
+    const isEdit = Boolean(values.id);
+    const res = await apiFetch(isEdit ? `${endpoint}/${values.id}` : endpoint, {
+      method: isEdit ? "PATCH" : "POST",
+      body: JSON.stringify(values),
+    }, token);
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(body?.error || body?.message || `HTTP ${res.status}`);
+    setCreating(false);
+    setEditing(null);
+    setNotice(isEdit ? "Record updated successfully." : "Record added successfully.");
+    reload();
+  };
+
+  const deleteRecord = async (row: AdminRow) => {
+    const endpoint = ADMIN_ENDPOINTS[moduleKey];
+    if (!endpoint || !token || !row.id) return;
+    if (!confirm(`Delete ${adminValue(row, ["name", "title", "display_name", "reference", "id"])}?`)) return;
+    const res = await apiFetch(`${endpoint}/${row.id}`, { method: "DELETE" }, token);
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error(body?.error || body?.message || `HTTP ${res.status}`);
+    }
+    setNotice("Record deleted successfully.");
+    reload();
+  };
+
+  return (
+    <div className="space-y-6">
+      <AdminHero title={meta.title} description={meta.description} cta={meta.cta} onRefresh={reload} onCta={() => setCreating(true)} />
+      {notice && <AdminNotice tone="ok" text={notice} />}
+      {error && <AdminNotice tone="warn" text={`${meta.title}: ${error}`} />}
+      <AdminProfessionalTable
+        rows={rows}
+        loading={loading}
+        emptyText={`No ${meta.title.toLowerCase()} records found yet.`}
+        moduleKey={moduleKey}
+        onEdit={setEditing}
+        onDelete={deleteRecord}
+      />
+      {(creating || editing) && (
+        <AdminRecordModal
+          title={`${editing ? "Edit" : "Add"} ${meta.title}`}
+          moduleKey={moduleKey}
+          fields={resolvedAdminFields(moduleKey, references)}
+          initial={editing}
+          onClose={() => { setCreating(false); setEditing(null); }}
+          onSave={saveRecord}
+        />
+      )}
+    </div>
+  );
+}
+
+function AdminBookingsModule({ token }: { token?: string }) {
+  const { rows, loading, error, reload } = useAdminRows("studio-bookings", token);
+  const [editing, setEditing] = useState<AdminRow | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [notice, setNotice] = useState("");
+  const references = useAdminReferenceData(token);
+
+  const updateStatus = async (row: AdminRow, status: string) => {
+    const id = row.id;
+    if (!id || !token) return;
+    try {
+      const res = await apiFetch(`/bookings/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }, token);
+      if (!res.ok) {
+        await apiFetch(`/bookings/${id}/${status}`, { method: "POST" }, token).catch(() => null);
+      }
+      setNotice(`Booking marked as ${status}. Email notification sent if SMTP is available.`);
+      reload();
+    } catch {
+      reload();
+    }
+  };
+
+  const saveBooking = async (values: AdminRow) => {
+    if (!token) return;
+    const payload = {
+      ...values,
+      artist_id: values.artist_id || "artist-aniket",
+      studio_id: values.studio_id || "studio-gold",
+      service_id: values.service_id || "studio-session",
+      engineer_id: values.engineer_id || "staff-engineer",
+      duration_hours: Number(values.duration_hours || 2),
+    };
+    const isEdit = Boolean(values.id);
+    const res = await apiFetch(isEdit ? `/bookings/${values.id}` : "/bookings", {
+      method: isEdit ? "PATCH" : "POST",
+      body: JSON.stringify(payload),
+    }, token);
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(body?.error || body?.message || `HTTP ${res.status}`);
+    setCreating(false);
+    setEditing(null);
+    setNotice(isEdit ? "Booking updated successfully." : `Booking created successfully${body?.mail?.sent ? " and email sent." : "."}`);
+    reload();
+  };
+
+  const deleteBooking = async (row: AdminRow) => {
+    if (!token || !row.id) return;
+    if (!confirm(`Delete booking ${adminValue(row, ["reference", "booking_reference", "id"])}?`)) return;
+    const res = await apiFetch(`/bookings/${row.id}`, { method: "DELETE" }, token);
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error(body?.error || body?.message || `HTTP ${res.status}`);
+    }
+    setNotice("Booking deleted successfully.");
+    reload();
+  };
+  const bookingDateLabel = (row: AdminRow) => {
+    const date = row.date ? new Date(`${row.date}T12:00:00`) : null;
+    if (!date || Number.isNaN(date.getTime())) return "—";
+    return date.toLocaleDateString("nl-NL", { day: "2-digit", month: "short", year: "numeric" });
+  };
+  const bookingTimeLabel = (row: AdminRow) => {
+    const start = String(row.start_time || row.start_at || "").slice(0, 5);
+    const end = String(row.end_time || row.end_at || "").slice(0, 5);
+    return start && end ? `${start} – ${end}` : "—";
+  };
+  const BookingAction = ({ label, icon: Icon, onClick, danger, success }: { label: string; icon: typeof Activity; onClick: () => void; danger?: boolean; success?: boolean }) => (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      onClick={onClick}
+      className="inline-flex h-9 w-9 items-center justify-center rounded-xl border transition-all hover:-translate-y-0.5"
+      style={{
+        background: danger ? "rgba(239,68,68,0.12)" : success ? "rgba(34,197,94,0.10)" : "rgba(255,255,255,0.025)",
+        borderColor: danger ? "rgba(239,68,68,0.30)" : success ? "rgba(34,197,94,0.26)" : DB_BORDER,
+        color: danger ? "#F87171" : success ? "#4ADE80" : "rgba(240,237,230,0.78)",
+      }}
+    >
+      <Icon size={15} />
+    </button>
+  );
+
+  return (
+    <div className="space-y-6">
+      <AdminHero title={ADMIN_META["studio-bookings"].title} description={ADMIN_META["studio-bookings"].description} cta="Add booking" onRefresh={reload} onCta={() => setCreating(true)} />
+      {notice && <AdminNotice tone="ok" text={notice} />}
+      {error && <AdminNotice tone="warn" text={`Studio bookings: ${error}`} />}
+      <div className="overflow-hidden rounded-3xl border" style={{ background: "#0D0D0D", borderColor: DB_BORDER }}>
+        <div className="overflow-x-auto">
+          <table className="min-w-[1040px] w-full text-sm">
+            <thead>
+              <tr style={{ background: "rgba(201,168,76,0.06)", borderBottom: `1px solid ${DB_BORDER}` }}>
+                {["Booking", "Artist / User", "Studio", "Service", "Schedule", "Status", "Staff", "Actions"].map((h) => (
+                  <th key={h} className="px-5 py-4 text-left text-[10px] font-semibold uppercase tracking-[0.28em]" style={{ color: "rgba(240,237,230,0.52)" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr><td colSpan={8} className="px-5 py-10 text-center" style={{ color: "rgba(240,237,230,0.45)" }}>Loading bookings…</td></tr>
+              ) : rows.length === 0 ? (
+                <tr><td colSpan={8} className="px-5 py-10 text-center" style={{ color: "rgba(240,237,230,0.45)" }}>No studio bookings found yet.</td></tr>
+              ) : rows.map((row, index) => {
+                const status = adminValue(row, ["status.slug", "status.name", "status"], "pending").toLowerCase();
+                const reference = adminValue(row, ["booking_reference", "reference", "id"]);
+                return (
+                  <tr key={row.id ?? reference} className="align-middle transition-colors hover:bg-[rgba(201,168,76,0.035)]" style={{ borderBottom: index < rows.length - 1 ? `1px solid rgba(201,168,76,0.09)` : "none" }}>
+                    <td className="px-5 py-5">
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-[11px] font-bold" style={{ background: "rgba(201,168,76,0.10)", color: G, border: "1px solid rgba(201,168,76,0.18)" }}>
+                          DV
+                        </div>
+                        <div>
+                          <p className="font-semibold leading-tight" style={{ color: G }}>{reference}</p>
+                          <p className="mt-1 text-[10px]" style={{ color: "rgba(240,237,230,0.35)" }}>#{row.id}</p>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-5 py-5">
+                      <p className="font-medium" style={{ color: "rgba(240,237,230,0.90)" }}>{adminValue(row, ["artist.display_name", "user.name", "artist_name"], "—")}</p>
+                      <p className="mt-1 text-xs" style={{ color: "rgba(240,237,230,0.38)" }}>{adminValue(row, ["artist.email", "user.email", "email"], "")}</p>
+                    </td>
+                    <td className="px-5 py-5">
+                      <span className="rounded-full px-3 py-1 text-xs font-medium" style={{ background: "rgba(201,168,76,0.08)", color: "rgba(240,237,230,0.78)", border: "1px solid rgba(201,168,76,0.14)" }}>
+                        {adminValue(row, ["studio.name", "studio_name"])}
+                      </span>
+                    </td>
+                    <td className="px-5 py-5" style={{ color: "rgba(240,237,230,0.72)" }}>{adminValue(row, ["booking_type.name", "service.name", "service_name"])}</td>
+                    <td className="px-5 py-5">
+                      <p className="font-medium" style={{ color: "rgba(240,237,230,0.84)" }}>{bookingDateLabel(row)}</p>
+                      <p className="mt-1 text-xs" style={{ color: G }}>{bookingTimeLabel(row)}</p>
+                    </td>
+                    <td className="px-5 py-5"><AdminStatusPill status={status} /></td>
+                    <td className="px-5 py-5">
+                      <p className="max-w-[170px] text-xs leading-relaxed" style={{ color: "rgba(240,237,230,0.62)" }}>{adminValue(row, ["required_staff_label", "required_staff.0.display_name", "staff.display_name"])}</p>
+                    </td>
+                    <td className="px-5 py-5">
+                      <div className="flex flex-wrap justify-end gap-2">
+                        <BookingAction label="Edit booking" icon={Edit3} onClick={() => setEditing(row)} />
+                        {status !== "confirmed" && <BookingAction label="Confirm booking" icon={Check} success onClick={() => updateStatus(row, "confirmed")} />}
+                        {status !== "cancelled" && <BookingAction label="Cancel booking" icon={Ban} danger onClick={() => updateStatus(row, "cancelled")} />}
+                        {status !== "completed" && <BookingAction label="Complete booking" icon={Check} success onClick={() => updateStatus(row, "completed")} />}
+                        {status !== "no_show" && <BookingAction label="Mark no show" icon={CircleSlash} onClick={() => updateStatus(row, "no_show")} />}
+                        <BookingAction label="Delete booking" icon={Trash2} danger onClick={() => deleteBooking(row)} />
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {(creating || editing) && (
+        <AdminRecordModal
+          title={`${editing ? "Edit" : "Add"} booking`}
+          moduleKey="studio-bookings"
+          fields={resolvedAdminFields("studio-bookings", references)}
+          initial={editing}
+          onClose={() => { setCreating(false); setEditing(null); }}
+          onSave={saveBooking}
+        />
+      )}
+    </div>
+  );
+}
+
+function AdminSettingsModule({ token }: { token?: string }) {
+  const [settings, setSettings] = useState<AdminRow[]>([]);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [testingEmail, setTestingEmail] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+
+  const load = async () => {
+    if (!token) return;
+    setLoading(true);
+    setError("");
+    try {
+      const res = await apiFetch("/settings", {}, token);
+      const body = await res.json().catch(() => []);
+      if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
+      const rows = Array.isArray(body) ? body : [];
+      setSettings(rows);
+      setValues(Object.fromEntries(rows.map((row: any) => [row.slug, row.value || ""])));
+    } catch (err: any) {
+      setError(err?.message || "Unable to load SMTP settings");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, [token]);
+
+  const setValue = (key: string, value: string) => {
+    setValues((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!token) return;
+    setSaving(true);
+    setNotice("");
+    setError("");
+    try {
+      for (const row of settings) {
+        const nextValue = values[row.slug] ?? "";
+        await apiFetch(`/settings/${row.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ value: nextValue }),
+        }, token).then(async (res) => {
+          if (!res.ok) {
+            const body = await res.json().catch(() => null);
+            throw new Error(body?.error || `Unable to save ${row.name}`);
+          }
+        });
+      }
+      setNotice("Email and booking policy settings saved.");
+      load();
+    } catch (err: any) {
+      setError(err?.message || "Unable to save SMTP settings");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const testEmail = async () => {
+    if (!token) return;
+    setTestingEmail(true);
+    setNotice("");
+    setError("");
+    try {
+      const response = await apiFetch("/settings/test-email", { method: "POST", body: "{}" }, token);
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || !body.sent) throw new Error(body.reason || body.error || "SMTP test failed");
+      setNotice(`Test email sent successfully to ${body.recipientCount || 1} admin recipient(s).`);
+    } catch (err: any) {
+      setError(err?.message || "SMTP test failed");
+    } finally {
+      setTestingEmail(false);
+    }
+  };
+
+  const Field = ({ slug, label, type = "text", helper, placeholder }: { slug: string; label: string; type?: string; helper?: string; placeholder?: string }) => (
+    <label className="block">
+      <span className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.28em]" style={{ color: "rgba(240,237,230,0.52)" }}>{label}</span>
+      <input
+        type={type}
+        value={values[slug] || ""}
+        onChange={(event) => setValue(slug, event.target.value)}
+        placeholder={placeholder}
+        className="w-full rounded-xl border px-4 py-3 outline-none transition-colors focus:border-[rgba(201,168,76,0.55)]"
+        style={{ background: "#070707", borderColor: "rgba(201,168,76,0.18)", color: "rgba(240,237,230,0.86)" }}
+      />
+      {helper && <p className="mt-2 text-xs" style={{ color: "rgba(240,237,230,0.38)" }}>{helper}</p>}
+    </label>
+  );
+
+  return (
+    <div className="space-y-6">
+      <AdminHero title="Email / SMTP Settings" description="Configure only the sender email, SMTP credentials and admin recipients used for booking and contact emails." onRefresh={load} />
+      {notice && <AdminNotice tone="ok" text={notice} />}
+      {error && <AdminNotice tone="warn" text={`Settings: ${error}`} />}
+
+      <form onSubmit={save} className="rounded-3xl border p-6" style={{ background: "#0D0D0D", borderColor: DB_BORDER }}>
+        {loading ? (
+          <p className="text-sm" style={{ color: "rgba(240,237,230,0.45)" }}>Loading SMTP settings…</p>
+        ) : (
+          <div className="space-y-6">
+            <div className="rounded-2xl border p-4" style={{ background: "rgba(201,168,76,0.045)", borderColor: "rgba(201,168,76,0.16)" }}>
+              <p className="text-[10px] tracking-[0.35em] uppercase" style={{ color: G }}>Email sender</p>
+              <p className="mt-2 text-sm" style={{ color: "rgba(240,237,230,0.58)" }}>
+                Yahi email se user aur admin ko booking/contact notification jayega. Gmail use kar rahe ho to SMTP app password required hai.
+              </p>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <Field slug="from_name" label="From name" placeholder="Déjà Vu Studio" />
+              <Field slug="from_email" label="From email" type="email" placeholder="aniketsharma8541@gmail.com" helper="Email me sender ke naam ke saath ye address dikhega." />
+              <Field slug="smtp_host" label="SMTP host" placeholder="smtp.gmail.com" />
+              <Field slug="smtp_port" label="SMTP port" type="number" placeholder="587" helper="Gmail ke liye 587 recommended." />
+              <Field slug="smtp_user" label="SMTP username" type="email" placeholder="aniketsharma8541@gmail.com" helper="Generally same as sender Gmail." />
+              <Field slug="smtp_pass" label="SMTP app password" type="password" placeholder="Gmail app password" helper="Normal Gmail password nahi; Google App Password use karo." />
+            </div>
+
+            <Field slug="admin_recipients" label="Admin notification email(s)" placeholder="aniketsharma8541@gmail.com" helper="Multiple admins ke liye comma use karo, e.g. admin1@gmail.com, admin2@gmail.com" />
+
+            <div className="rounded-2xl border p-4" style={{ background: "rgba(201,168,76,0.035)", borderColor: DB_BORDER }}>
+              <Field slug="cancellation_window_hours" label="Artist cancellation window (hours)" type="number" placeholder="24" helper="Artist apni booking session start se itne hours pehle tak cancel kar sakta hai. Admin cancellation par restriction nahi hai." />
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-5" style={{ borderColor: DB_BORDER }}>
+              <p className="text-xs" style={{ color: "rgba(240,237,230,0.38)" }}>
+                Booking create/confirm/cancel par user email + admin recipients dono ko email jayega.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={testEmail} disabled={testingEmail || saving}
+                  className="inline-flex items-center gap-2 rounded-xl border px-5 py-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+                  style={{ borderColor: DB_BORDER, color: G_LIGHT, background: "rgba(201,168,76,0.06)" }}>
+                  <Mail size={16} /> {testingEmail ? "Testing…" : "Send test email"}
+                </button>
+                <button
+                  type="submit"
+                  disabled={saving || testingEmail}
+                  className="inline-flex items-center gap-2 rounded-xl border px-5 py-3 text-sm font-semibold transition-transform hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
+                  style={{ background: "linear-gradient(135deg, #F2D77A, #A87C22)", borderColor: "rgba(242,215,122,0.42)", color: "#050505" }}
+                >
+                  <Check size={16} />
+                  {saving ? "Saving…" : "Save settings"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </form>
+    </div>
+  );
+}
+
+function AdminProfessionalTable({ rows, loading, emptyText, moduleKey, onEdit, onDelete }: { rows: AdminRow[]; loading: boolean; emptyText: string; moduleKey: AdminModuleKey; onEdit?: (row: AdminRow) => void; onDelete?: (row: AdminRow) => void }) {
+  const columns = getColumns(moduleKey, rows[0]);
+  return (
+    <div className="overflow-hidden rounded-3xl border" style={{ background: "#0D0D0D", borderColor: DB_BORDER }}>
+      <div className="overflow-x-auto">
+        <table className="min-w-[920px] w-full text-sm">
+          <thead>
+            <tr style={{ background: "rgba(201,168,76,0.06)", borderBottom: `1px solid ${DB_BORDER}` }}>
+              {columns.map((column) => (
+                <th key={column.label} className="px-5 py-4 text-left text-[10px] font-semibold uppercase tracking-[0.28em]" style={{ color: "rgba(240,237,230,0.52)" }}>{column.label}</th>
+              ))}
+              <th className="px-5 py-4 text-right text-[10px] font-semibold uppercase tracking-[0.28em]" style={{ color: "rgba(240,237,230,0.52)" }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr><td colSpan={columns.length + 1} className="px-5 py-10 text-center" style={{ color: "rgba(240,237,230,0.45)" }}>Loading records…</td></tr>
+            ) : rows.length === 0 ? (
+              <tr><td colSpan={columns.length + 1} className="px-5 py-10 text-center" style={{ color: "rgba(240,237,230,0.45)" }}>{emptyText}</td></tr>
+            ) : rows.map((row, index) => (
+              <tr key={row.id ?? index} style={{ borderBottom: index < rows.length - 1 ? `1px solid rgba(201,168,76,0.09)` : "none" }}>
+                {columns.map((column) => (
+                  <td key={column.label} className="px-5 py-5" style={{ color: column.gold ? G : "rgba(240,237,230,0.70)" }}>
+                    {column.render ? column.render(row) : adminValue(row, column.keys)}
+                  </td>
+                ))}
+                <td className="px-5 py-5">
+                  <div className="flex justify-end gap-2">
+                    <AdminIconButton label="Edit" icon={Edit3} onClick={() => onEdit?.(row)} />
+                    <AdminIconButton label="Delete" icon={Trash2} danger onClick={() => onDelete?.(row)} />
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function AdminRecordModal({ title, moduleKey, initial, fields: suppliedFields, onClose, onSave }: { title: string; moduleKey: AdminModuleKey; initial: AdminRow | null; fields?: AdminFormField[]; onClose: () => void; onSave: (values: AdminRow) => Promise<void> }) {
+  const [values, setValues] = useState<AdminRow>(() => initialToForm(moduleKey, initial));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const fields = suppliedFields || adminFormFields(moduleKey);
+
+  const update = (name: string, value: string) => setValues((prev) => ({ ...prev, [name]: value }));
+
+  const submit = async (event: any) => {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await onSave(values);
+    } catch (err: any) {
+      setError(err?.message || "Unable to save record");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+      <form onSubmit={submit} className="w-full max-w-3xl overflow-hidden rounded-3xl border shadow-2xl"
+        style={{ background: "#0B0B0B", borderColor: "rgba(201,168,76,0.22)", color: WHITE }}>
+        <div className="flex items-center justify-between border-b px-6 py-5" style={{ borderColor: DB_BORDER }}>
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.35em]" style={{ color: G }}>Déjà Vu Studio OS</p>
+            <h3 className="mt-1 font-display text-2xl">{title}</h3>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-xl border p-2" style={{ borderColor: DB_BORDER }}>
+            <X size={18} />
+          </button>
+        </div>
+        <div className="grid max-h-[68vh] gap-4 overflow-y-auto p-6 md:grid-cols-2">
+          {values.id && <input type="hidden" value={values.id} />}
+          {fields.map((field) => (
+            <label key={field.name} className={field.type === "textarea" ? "md:col-span-2" : ""}>
+              <span className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.28em]" style={{ color: "rgba(240,237,230,0.52)" }}>
+                {field.label}{field.required ? " *" : ""}
+              </span>
+              {field.type === "select" ? (
+                <select
+                  required={field.required}
+                  value={values[field.name] ?? ""}
+                  onChange={(event) => update(field.name, event.target.value)}
+                  className="h-12 w-full rounded-xl border bg-black px-4 text-sm outline-none"
+                  style={{ borderColor: DB_BORDER, color: WHITE }}
+                >
+                  <option value="">Select...</option>
+                  {field.options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+              ) : field.type === "textarea" ? (
+                <textarea
+                  value={values[field.name] ?? ""}
+                  onChange={(event) => update(field.name, event.target.value)}
+                  rows={4}
+                  className="w-full rounded-xl border bg-black px-4 py-3 text-sm outline-none"
+                  style={{ borderColor: DB_BORDER, color: WHITE }}
+                />
+              ) : (
+                <input
+                  required={field.required}
+                  type={field.type}
+                  value={values[field.name] ?? ""}
+                  onChange={(event) => update(field.name, event.target.value)}
+                  className="h-12 w-full rounded-xl border bg-black px-4 text-sm outline-none"
+                  style={{ borderColor: DB_BORDER, color: WHITE }}
+                />
+              )}
+            </label>
+          ))}
+          {error && <div className="md:col-span-2"><AdminNotice tone="warn" text={error} /></div>}
+        </div>
+        <div className="flex justify-end gap-3 border-t px-6 py-5" style={{ borderColor: DB_BORDER }}>
+          <AdminIconButton label="Cancel" icon={X} onClick={onClose} />
+          <button
+            disabled={saving}
+            className="inline-flex items-center gap-2 rounded-xl border px-5 py-2.5 text-sm font-semibold disabled:opacity-60"
+            style={{ background: "linear-gradient(135deg, #F2D77A, #A87C22)", borderColor: "rgba(242,215,122,0.42)", color: "#050505" }}
+          >
+            <Check size={16} />
+            {saving ? "Saving..." : "Save changes"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function initialToForm(moduleKey: AdminModuleKey, row: AdminRow | null): AdminRow {
+  if (moduleKey === "studio-bookings") {
+    return {
+      id: row?.id,
+      artist_id: row?.artist_id || "artist-aniket",
+      studio_id: row?.studio_id || row?.studio?.id || "studio-gold",
+      service_id: row?.service_id || "studio-session",
+      engineer_id: row?.engineer_id || "staff-engineer",
+      beat_maker_id: row?.beat_maker_id || "",
+      artist_type_id: row?.artist_type_id || "goldlective",
+      date: row?.date || new Date(Date.now() + 86400000).toISOString().slice(0, 10),
+      start_time: String(row?.start_time || "15:00").slice(0, 5),
+      end_time: String(row?.end_time || "17:00").slice(0, 5),
+      duration_hours: row?.duration_hours || 2,
+      status: row?.status?.slug || row?.status || "pending",
+      notes: row?.notes || "",
+    };
+  }
+  if (moduleKey === "users" || moduleKey === "artist-profiles") {
+    const role = row?.user_roles?.[0]?.role?.slug || row?.role || "artist";
+    return {
+      id: row?.id,
+      name: row?.display_name || row?.name || "",
+      full_name: row?.full_name || row?.name || "",
+      email: row?.email || "",
+      role,
+      secondary_role_id: row?.user_roles?.[1]?.role?.slug || "",
+      password: "",
+      program: row?.user_programs?.[0]?.program?.slug || row?.program || "",
+      status: row?.is_active === false ? "inactive" : "active",
+    };
+  }
+  if (moduleKey === "services") {
+    return {
+      id: row?.id,
+      name: row?.name || "",
+      slug: row?.slug || "",
+      description: row?.description || "",
+      duration_minutes: row?.duration_minutes || 120,
+      available_durations: Array.isArray(row?.available_durations) ? row.available_durations.join(", ") : (row?.duration_minutes || 120),
+      studio_required: row?.studio_required === false ? "false" : "true",
+      default_studio_id: row?.default_studio_id || "",
+      is_bookable: row?.is_bookable === false ? "false" : "true",
+      engineer_required: row?.options?.some((option: any) => option.role?.slug === "engineer" && option.is_required) ? "yes" : "no",
+      beat_maker_optional: row?.options?.some((option: any) => ["beatmaker", "beat-creator"].includes(option.role?.slug) && option.is_optional) ? "yes" : "no",
+      status: row?.is_active === false ? "inactive" : "active",
+    };
+  }
+  if (moduleKey === "studios") {
+    return {
+      id: row?.id,
+      name: row?.name || "",
+      slug: row?.slug || "",
+      description: row?.description || "",
+      opens_at: String(row?.opens_at || "10:00").slice(0, 5),
+      closes_at: String(row?.closes_at || "23:00").slice(0, 5),
+      is_bookable: row?.is_bookable === false ? "false" : "true",
+      status: row?.is_active === false ? "inactive" : "active",
+    };
+  }
+  if (moduleKey === "opening-hours") {
+    return {
+      id: row?.id,
+      studio_id: row?.studio_id || "studio-gold",
+      weekday: row?.weekday ?? "",
+      date: row?.date || "",
+      exception_type: row?.exception_type || (row?.date ? "special" : "regular"),
+      opens_at: String(row?.opens_at || "10:00").slice(0, 5),
+      closes_at: String(row?.closes_at || "23:00").slice(0, 5),
+      is_open: row?.is_open === false ? "false" : "true",
+      notes: row?.notes || "",
+    };
+  }
+  if (moduleKey === "staff-availability") {
+    return {
+      id: row?.id,
+      profile_id: row?.profile_id || "",
+      availability_type: row?.date ? "specific" : "recurring",
+      weekday: row?.weekday ?? "",
+      date: row?.date || "",
+      start_time: String(row?.start_time || "10:00").slice(0, 5),
+      end_time: String(row?.end_time || "22:00").slice(0, 5),
+      is_available: row?.is_available === false ? "false" : "true",
+      notes: row?.notes || "",
+    };
+  }
+  return {
+    id: row?.id,
+    name: row?.name || row?.display_name || row?.title || "",
+    slug: row?.slug || "",
+    description: row?.description || row?.message || "",
+    status: row?.status || (row?.is_active === false ? "inactive" : "active"),
+  };
+}
+
+function adminFormFields(moduleKey: AdminModuleKey): AdminFormField[] {
+  if (moduleKey === "studio-bookings") {
+    return [
+      { name: "artist_id", label: "Artist / User", type: "select", required: true, options: [{ value: "artist-aniket", label: "Aniket Devworks · aniket.devworks@gmail.com" }] },
+      { name: "artist_type_id", label: "Artist type", type: "select", required: true, options: [{ value: "goldlective", label: "Goldlective · 12 hrs/month" }, { value: "house-artist", label: "House Artist · financial agreement" }] },
+      { name: "studio_id", label: "Studio", type: "select", required: true, options: [{ value: "studio-gold", label: "Studio Gold" }, { value: "studio-silver", label: "Studio Silver" }] },
+      { name: "service_id", label: "Service", type: "select", required: true, options: [{ value: "studio-session", label: "Studio Session · 120 min" }, { value: "beat-session", label: "Beat Session · 240 min" }] },
+      { name: "engineer_id", label: "Engineer", type: "select", required: true, options: [{ value: "staff-engineer", label: "Studio Engineer" }] },
+      { name: "beat_maker_id", label: "Beat Maker", type: "select", options: [{ value: "staff-beatmaker", label: "Beat Maker" }] },
+      { name: "date", label: "Date", type: "date", required: true },
+      { name: "start_time", label: "Start time", type: "time", required: true },
+      { name: "end_time", label: "End time", type: "time", required: true },
+      { name: "duration_hours", label: "Duration hours", type: "number", required: true },
+      { name: "status", label: "Status", type: "select", required: true, options: [
+        { value: "pending", label: "Pending" },
+        { value: "confirmed", label: "Confirmed" },
+        { value: "cancelled", label: "Cancelled" },
+        { value: "completed", label: "Completed" },
+        { value: "no_show", label: "No show" },
+      ] },
+      { name: "notes", label: "Notes", type: "textarea" },
+    ];
+  }
+  if (moduleKey === "users" || moduleKey === "artist-profiles") {
+    return [
+      { name: "name", label: "Display name", type: "text", required: true },
+      { name: "full_name", label: "Full name", type: "text" },
+      { name: "email", label: "Email address", type: "email", required: true },
+      { name: "role", label: "Role", type: "select", required: true, options: [
+        { value: "artist", label: "Artist" },
+        { value: "administrator", label: "Administrator" },
+        { value: "engineer", label: "Engineer" },
+        { value: "beatmaker", label: "Beat Maker" },
+        { value: "film-director-cameraman", label: "Film Director / Cameraman" },
+      ] },
+      { name: "secondary_role_id", label: "Additional role (optional)", type: "select", options: [
+        { value: "artist", label: "Artist" },
+        { value: "administrator", label: "Administrator" },
+        { value: "engineer", label: "Engineer" },
+        { value: "beatmaker", label: "Beat Maker" },
+        { value: "film-director-cameraman", label: "Film Director / Cameraman" },
+      ] },
+      { name: "password", label: "Login password", type: "password" },
+      { name: "program", label: "Program", type: "select", options: [
+        { value: "", label: "No program assigned" },
+        { value: "goldlective", label: "Goldlective" },
+        { value: "house-artist", label: "House Artist" },
+      ] },
+      { name: "status", label: "Status", type: "select", options: [{ value: "active", label: "Active" }, { value: "inactive", label: "Inactive" }] },
+    ];
+  }
+  if (moduleKey === "services") {
+    return [
+      { name: "name", label: "Service name", type: "text", required: true },
+      { name: "slug", label: "Slug", type: "text" },
+      { name: "duration_minutes", label: "Duration in minutes", type: "number", required: true },
+      { name: "available_durations", label: "Available durations in minutes", type: "text", required: true },
+      { name: "studio_required", label: "Studio required?", type: "select", options: [{ value: "true", label: "Yes" }, { value: "false", label: "No" }] },
+      { name: "default_studio_id", label: "Default studio ID", type: "text" },
+      { name: "is_bookable", label: "Bookable?", type: "select", options: [{ value: "true", label: "Yes" }, { value: "false", label: "No" }] },
+      { name: "engineer_required", label: "Engineer required?", type: "select", required: true, options: [{ value: "yes", label: "Yes - engineer is required" }, { value: "no", label: "No - not required" }] },
+      { name: "beat_maker_optional", label: "Beat Maker option?", type: "select", options: [{ value: "no", label: "No beat maker option" }, { value: "yes", label: "Yes - optional beat maker" }] },
+      { name: "status", label: "Status", type: "select", options: [{ value: "active", label: "Active" }, { value: "inactive", label: "Inactive" }] },
+      { name: "description", label: "Client-facing description", type: "textarea" },
+    ];
+  }
+  if (moduleKey === "studios") {
+    return [
+      { name: "name", label: "Studio name", type: "text", required: true },
+      { name: "slug", label: "Slug", type: "text" },
+      { name: "description", label: "Description", type: "textarea" },
+      { name: "opens_at", label: "Default opening time", type: "time", required: true },
+      { name: "closes_at", label: "Default closing time", type: "time", required: true },
+      { name: "is_bookable", label: "Available for booking?", type: "select", required: true, options: [{ value: "true", label: "Bookable" }, { value: "false", label: "Not bookable" }] },
+      { name: "status", label: "Active status", type: "select", options: [{ value: "active", label: "Active" }, { value: "inactive", label: "Inactive" }] },
+    ];
+  }
+  if (moduleKey === "opening-hours") {
+    return [
+      { name: "studio_id", label: "Studio ID", type: "text", required: true },
+      { name: "exception_type", label: "Schedule type", type: "select", required: true, options: [{ value: "regular", label: "Regular hours" }, { value: "closed", label: "Closed date" }, { value: "holiday", label: "Holiday" }, { value: "maintenance", label: "Maintenance" }, { value: "event", label: "Event" }, { value: "special", label: "Different hours on specific date" }] },
+      { name: "weekday", label: "Weekday (0 Sunday - 6 Saturday)", type: "number" },
+      { name: "date", label: "Specific date", type: "date" },
+      { name: "opens_at", label: "Opens at", type: "time" },
+      { name: "closes_at", label: "Closes at", type: "time" },
+      { name: "is_open", label: "Open?", type: "select", required: true, options: [{ value: "true", label: "Open" }, { value: "false", label: "Closed" }] },
+      { name: "notes", label: "Notes", type: "textarea" },
+    ];
+  }
+  if (moduleKey === "staff-availability") {
+    return [
+      { name: "profile_id", label: "Staff profile ID", type: "text", required: true },
+      { name: "availability_type", label: "Availability type", type: "select", required: true, options: [{ value: "recurring", label: "Recurring weekly" }, { value: "specific", label: "Specific-date exception" }] },
+      { name: "weekday", label: "Weekday (0 Sunday - 6 Saturday)", type: "number" },
+      { name: "date", label: "Specific date", type: "date" },
+      { name: "start_time", label: "Start time", type: "time", required: true },
+      { name: "end_time", label: "End time", type: "time", required: true },
+      { name: "is_available", label: "Available?", type: "select", required: true, options: [{ value: "true", label: "Available" }, { value: "false", label: "Unavailable" }] },
+      { name: "notes", label: "Notes", type: "textarea" },
+    ];
+  }
+  if (moduleKey === "financial-agreements") {
+    return [
+      { name: "name", label: "Artist", type: "text", required: true },
+      { name: "agreement_type", label: "Agreement type", type: "select", required: true, options: [{ value: "Monthly", label: "Monthly" }, { value: "Hourly", label: "Hourly" }] },
+      { name: "monthly_rate", label: "Rate", type: "text" },
+      { name: "included_hours", label: "Included hours", type: "number" },
+      { name: "effective_from", label: "Effective from", type: "date" },
+      { name: "status", label: "Status", type: "select", options: [{ value: "active", label: "Active" }, { value: "inactive", label: "Inactive" }] },
+    ];
+  }
+  if (moduleKey === "opening-hours") {
+    return [
+      { label: "Studio", keys: ["studio.name", "studio_id"], gold: true },
+      {
+        label: "Schedule",
+        keys: ["date", "weekday"],
+        render: (row) => {
+          const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+          if (row.date) return new Date(`${row.date}T00:00:00`).toLocaleDateString("nl-NL", { day: "2-digit", month: "short", year: "numeric" });
+          if (typeof row.weekday === "number" || /^\d$/.test(String(row.weekday ?? ""))) return `${days[Number(row.weekday)] || `Day ${row.weekday}`} · recurring`;
+          return adminValue(row, ["weekday"], "Regular schedule");
+        },
+      },
+      {
+        label: "Hours",
+        keys: ["opens_at", "closes_at"],
+        render: (row) => row.is_open === false ? "Closed all day" : `${String(row.opens_at || "—").slice(0, 5)} – ${String(row.closes_at || "—").slice(0, 5)}`,
+      },
+      { label: "Type", keys: ["exception_type"], render: (row) => adminValue(row, ["exception_type"], row.date ? "Exception" : "Regular").replace(/_/g, " ") },
+      { label: "Notes", keys: ["notes"], render: (row) => adminValue(row, ["notes"], "No notes") },
+    ];
+  }
+  if (moduleKey === "staff-availability") {
+    return [
+      { label: "Staff member", keys: ["profile.display_name", "profile.name", "profile_id"], gold: true },
+      {
+        label: "Applies to",
+        keys: ["date", "weekday"],
+        render: (row) => {
+          const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+          return row.date ? new Date(`${row.date}T00:00:00`).toLocaleDateString("nl-NL", { day: "2-digit", month: "short", year: "numeric" }) : `${days[Number(row.weekday)] || "Weekly"} · recurring`;
+        },
+      },
+      { label: "Hours", keys: ["start_time", "end_time"], render: (row) => `${String(row.start_time || "—").slice(0, 5)} – ${String(row.end_time || "—").slice(0, 5)}` },
+      { label: "Availability", keys: ["is_available"], render: (row) => <AdminStatusPill status={row.is_available === false ? "unavailable" : "available"} /> },
+      { label: "Notes", keys: ["notes"], render: (row) => adminValue(row, ["notes"], "No notes") },
+    ];
+  }
+  if (moduleKey === "studio-hour-ledger") {
+    return [
+      { name: "name", label: "User", type: "text", required: true },
+      { name: "artist_type", label: "Artist type", type: "text" },
+      { name: "month", label: "Month", type: "month", required: true },
+      { name: "allocated_hours", label: "Allocated hours", type: "number", required: true },
+      { name: "used_hours", label: "Used hours", type: "number" },
+      { name: "remaining_hours", label: "Remaining hours", type: "number" },
+    ];
+  }
+  if (moduleKey === "goldlective-extra-hours") {
+    return [
+      { name: "booking_reference", label: "Booking reference", type: "text", required: true },
+      { name: "hours", label: "Extra hours", type: "number", required: true },
+      { name: "reason", label: "Approval reason", type: "textarea" },
+      { name: "status", label: "Status", type: "select", options: [{ value: "approved", label: "Approved" }, { value: "pending", label: "Pending" }] },
+    ];
+  }
+  if (moduleKey === "settings") {
+    return [
+      { name: "name", label: "Setting name", type: "text", required: true },
+      { name: "slug", label: "Setting key", type: "text", required: true },
+      { name: "value", label: "Value", type: "text" },
+      { name: "description", label: "What this controls", type: "textarea" },
+      { name: "status", label: "Status", type: "select", options: [{ value: "active", label: "Active" }, { value: "inactive", label: "Inactive" }] },
+    ];
+  }
+  return [
+    { name: "name", label: "Name", type: "text", required: true },
+    { name: "slug", label: "Slug", type: "text" },
+    { name: "description", label: "Description / notes", type: "textarea" },
+    { name: "status", label: "Status", type: "select", options: [{ value: "active", label: "Active" }, { value: "inactive", label: "Inactive" }] },
+  ];
+}
+
+function getColumns(moduleKey: AdminModuleKey, sample?: AdminRow): { label: string; keys: string[]; gold?: boolean; render?: (row: AdminRow) => string | JSX.Element }[] {
+  if (moduleKey === "opening-hours") {
+    const weekdayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    return [
+      { label: "Studio", keys: ["studio.name", "studio_id"], gold: true },
+      { label: "Schedule", keys: ["date", "weekday"], render: (row) => row.date ? String(row.date) : row.weekday !== undefined && row.weekday !== null ? weekdayNames[Number(row.weekday)] || String(row.weekday) : "Every day" },
+      { label: "Hours", keys: ["opens_at", "closes_at"], render: (row) => row.is_open === false ? "Closed all day" : row.opens_at && row.closes_at ? `${row.opens_at} – ${row.closes_at}` : "Open (hours not set)" },
+      { label: "Type", keys: ["exception_type", "type"], render: (row) => adminValue(row, ["exception_type", "type"], row.date ? "Custom exception" : "Regular hours") },
+      { label: "Notes", keys: ["notes", "description"] },
+    ];
+  }
+  if (moduleKey === "staff-availability") {
+    const weekdayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    return [
+      { label: "Staff member", keys: ["profile.display_name", "profile.email", "profile_id"], gold: true },
+      { label: "Applies to", keys: ["date", "weekday"], render: (row) => row.date ? String(row.date) : row.weekday !== undefined && row.weekday !== null ? `Every ${weekdayNames[Number(row.weekday)] || row.weekday}` : "All dates" },
+      { label: "Hours", keys: ["start_time", "end_time"], render: (row) => row.start_time && row.end_time ? `${row.start_time} – ${row.end_time}` : "All day" },
+      { label: "Availability", keys: ["is_available"], render: (row) => <AdminStatusPill status={row.is_available === false ? "unavailable" : "active"} /> },
+      { label: "Notes", keys: ["notes", "description"] },
+    ];
+  }
+  if (moduleKey === "services") {
+    return [
+      { label: "Service", keys: ["name"], gold: true },
+      { label: "Slug", keys: ["slug"] },
+      { label: "Duration", keys: ["duration_minutes"], render: (row) => `${adminValue(row, ["duration_minutes"], "—")} min` },
+      {
+        label: "Staff rules",
+        keys: ["options"],
+        render: (row) => {
+          const options = Array.isArray(row.options) ? row.options : [];
+          const labels = options.map((option: any) => `${option.label || option.role?.name}${option.is_required ? " required" : " optional"}`);
+          return labels.length ? labels.join(" · ") : "No staff required";
+        },
+      },
+      { label: "Status", keys: ["status"], render: (row) => <AdminStatusPill status={row.is_active === false ? "inactive" : "active"} /> },
+    ];
+  }
+  if (moduleKey === "studio-hour-ledger") {
+    return [
+      { label: "User", keys: ["user.display_name", "profile.display_name", "artist.display_name", "email"], gold: true },
+      { label: "Artist Type", keys: ["artist_type.name", "artistType.name", "artist_type"] },
+      { label: "Month", keys: ["month", "period"] },
+      { label: "Allocated", keys: ["allocated_hours", "hours_total", "allocated"] },
+      { label: "Used", keys: ["used_hours", "hours_used", "used"] },
+      { label: "Remaining", keys: ["remaining_hours", "hours_remaining", "remaining"] },
+    ];
+  }
+  if (moduleKey === "financial-agreements") {
+    return [
+      { label: "Artist", keys: ["artist.display_name", "profile.display_name", "user.email"], gold: true },
+      { label: "Agreement", keys: ["agreement_type", "type", "billing_type"] },
+      { label: "Rate", keys: ["rate", "hourly_rate", "monthly_rate"] },
+      { label: "Included Hours", keys: ["included_hours", "hours_included"] },
+      { label: "Effective From", keys: ["effective_from", "starts_at"], render: (row) => prettyDateTime(row.effective_from ?? row.starts_at) },
+      { label: "Status", keys: ["status"], render: (row) => <AdminStatusPill status={adminValue(row, ["status"], "active")} /> },
+    ];
+  }
+  if (moduleKey === "audit-history") {
+    return [
+      { label: "Action", keys: ["action", "event", "type"], gold: true },
+      { label: "Entity", keys: ["entity", "entity_type"] },
+      { label: "Entity ID", keys: ["entity_id", "record_id"] },
+      { label: "Actor", keys: ["actor.display_name", "actor.email", "actor_name"] },
+      { label: "Details", keys: ["details", "message"], render: (row) => typeof row.details === "object" ? JSON.stringify(row.details) : adminValue(row, ["details", "message"]) },
+    ];
+  }
+  if (moduleKey === "notifications") {
+    return [
+      { label: "Title", keys: ["title", "subject", "type"], gold: true },
+      { label: "Message", keys: ["message", "body"] },
+      { label: "Status", keys: ["read_at", "status"], render: (row) => <AdminStatusPill status={row.read_at ? "read" : "unread"} /> },
+      { label: "Created", keys: ["created_at"], render: (row) => prettyDateTime(row.created_at) },
+    ];
+  }
+  if (moduleKey === "contact-messages") {
+    return [
+      { label: "Name", keys: ["name", "naam"], gold: true },
+      { label: "Email", keys: ["email"] },
+      { label: "Message", keys: ["message", "bericht"] },
+      { label: "Submitted", keys: ["created_at"], render: (row) => prettyDateTime(row.created_at) },
+    ];
+  }
+  if (moduleKey === "settings") {
+    return [
+      { label: "Setting", keys: ["name"], gold: true },
+      { label: "Key", keys: ["slug"] },
+      {
+        label: "Value",
+        keys: ["value"],
+        render: (row) => row.slug === "smtp_pass" && row.value ? "•••••••• configured" : adminValue(row, ["value"]),
+      },
+      { label: "Description", keys: ["description"] },
+      { label: "Status", keys: ["status"], render: (row) => <AdminStatusPill status={adminValue(row, ["status"], "active")} /> },
+    ];
+  }
+  const genericKeys = sample ? Object.keys(sample).filter((k) => !["created_at", "updated_at", "deleted_at"].includes(k)).slice(0, 5) : ["name", "slug", "description", "status"];
+  return genericKeys.map((key, index) => ({
+    label: key.replace(/_/g, " "),
+    keys: [key],
+    gold: index === 0,
+    render: (row) => typeof row[key] === "object" && row[key] !== null ? JSON.stringify(row[key]) : adminValue(row, [key]),
+  }));
+}
+
+function AdminStatusPill({ status }: { status: string }) {
+  const normalized = status.toLowerCase().replace(/\s+/g, "_");
+  const palette: Record<string, { bg: string; fg: string; label: string }> = {
+    confirmed: { bg: "rgba(14,165,233,0.14)", fg: "#38BDF8", label: "Confirmed" },
+    pending: { bg: "rgba(201,168,76,0.16)", fg: G_LIGHT, label: "Pending" },
+    cancelled: { bg: "rgba(239,68,68,0.15)", fg: "#F87171", label: "Cancelled" },
+    completed: { bg: "rgba(34,197,94,0.14)", fg: "#4ADE80", label: "Completed" },
+    no_show: { bg: "rgba(249,115,22,0.14)", fg: "#FB923C", label: "No show" },
+    unread: { bg: "rgba(201,168,76,0.16)", fg: G_LIGHT, label: "Unread" },
+    read: { bg: "rgba(148,163,184,0.12)", fg: "#CBD5E1", label: "Read" },
+    active: { bg: "rgba(34,197,94,0.14)", fg: "#4ADE80", label: "Active" },
+  };
+  const item = palette[normalized] ?? { bg: "rgba(148,163,184,0.12)", fg: "#CBD5E1", label: status };
+  return <span className="rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.22em]" style={{ background: item.bg, color: item.fg }}>{item.label}</span>;
+}
+
+function AdminNotice({ text, tone }: { text: string; tone: "warn" | "ok" }) {
+  return (
+    <div className="rounded-2xl border px-4 py-3 text-sm"
+      style={{ borderColor: tone === "ok" ? "rgba(34,197,94,0.25)" : "rgba(201,168,76,0.24)", color: tone === "ok" ? "#4ADE80" : G_LIGHT, background: tone === "ok" ? "rgba(34,197,94,0.08)" : "rgba(201,168,76,0.08)" }}>
+      {text}
     </div>
   );
 }
@@ -4346,6 +6268,14 @@ const router = createBrowserRouter([
   {
     path: "/dashboard",
     Component: DashboardPage,
+  },
+  {
+    path: "/admin-login",
+    Component: AdminLoginPage,
+  },
+  {
+    path: "/admin/*",
+    Component: AdminConsolePage,
   },
 ]);
 
